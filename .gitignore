@@ -1,0 +1,33 @@
+prompts/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Backend runtime data
+backend/var/
+backend/.env
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.env
+*.log
+npm-debug.log*
+.tanstack/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp

@@ -1,0 +1,168 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/*
+ * Tokens transcribed from Task/designs/DESIGN_TOKENS.md. Components must use
+ * these — no ad-hoc hex colors, font sizes, or spacing values (constitution:
+ * Technology Stack & Constraints, "Design tokens").
+ *
+ * Brand accent colors are runtime-overridable CSS custom properties, not
+ * static @theme values, because a later epic lets each trainer set their own
+ * accent (BrandingProvider). The @theme block below maps Tailwind utilities
+ * onto these variables via one level of indirection, so `bg-brand-primary`
+ * keeps working after a trainer's color is swapped in at runtime.
+ */
+
+:root {
+  --brand-primary: #00b300;
+  --brand-primary-soft: #4dff4d;
+  --brand-primary-deep: #006600;
+  --brand-primary-rgb: 0, 179, 0;
+}
+
+@theme {
+  --font-sans:
+    "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji",
+    "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+
+  /* Grayscale base palette */
+  --color-neutral-100: #f3f3f3;
+  --color-neutral-200: #cfcfcf;
+  --color-neutral-400: #868686;
+  --color-neutral-600: #5e5e5e;
+  --color-neutral-800: #363636;
+  --color-neutral-900: #0d0d0d;
+
+  /* Brand accent — indirected through the runtime-overridable :root vars */
+  --color-brand-primary: var(--brand-primary);
+  --color-brand-primary-soft: var(--brand-primary-soft);
+  --color-brand-primary-deep: var(--brand-primary-deep);
+
+  /* Typography scale */
+  --text-hero-title: 30px / 38px;
+  --text-section-title: 22px / 28px;
+  --text-block-title: 18px / 24px;
+  --text-card-title: 16px / 22px;
+  --text-body-lg: 16px / 26px;
+  --text-body: 14px / 22px;
+  --text-caption: 12px / 18px;
+  --text-eyebrow: 11px / 16px;
+  /* --text-hero-title: 30px;
+  --text-hero-title--line-height: 38px;
+  --text-hero-title--font-weight: 700;
+
+  --text-section-title: 22px;
+  --text-section-title--line-height: 28px;
+  --text-section-title--font-weight: 700;
+
+  --text-block-title: 18px;
+  --text-block-title--line-height: 24px;
+  --text-block-title--font-weight: 700;
+
+  --text-card-title: 16px;
+  --text-card-title--line-height: 22px;
+  --text-card-title--font-weight: 600;
+
+  --text-body-lg: 16px;
+  --text-body-lg--line-height: 26px;
+  --text-body-lg--font-weight: 400;
+
+  --text-body: 14px;
+  --text-body--line-height: 22px;
+  --text-body--font-weight: 400;
+
+  --text-caption: 12px;
+  --text-caption--line-height: 18px;
+  --text-caption--font-weight: 400;
+
+  --text-eyebrow: 11px;
+  --text-eyebrow--line-height: 16px;
+  --text-eyebrow--font-weight: 600; */
+
+  /* Spacing scale */
+  --spacing-sys-xxs: 4px;
+  --spacing-sys-xs: 8px;
+  --spacing-sys-sm: 12px;
+  --spacing-sys-md: 16px;
+  --spacing-sys-lg: 24px;
+  --spacing-sys-xl: 32px;
+  --spacing-sys-xxl: 40px;
+
+  /* Border radius */
+  --radius-sys-xs: 6px;
+  --radius-sys-sm: 10px;
+  --radius-sys-md: 16px;
+  --radius-sys-lg: 24px;
+  --radius-sys-xl: 32px;
+  --radius-sys-pill: 999px;
+
+  /* Shadows */
+  --shadow-card-soft: 0 2px 8px rgba(0, 0, 0, 0.2);
+  --shadow-card-strong: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --shadow-button-primary: 0 10px 30px rgba(var(--brand-primary-rgb), 0.55);
+  --shadow-button-primary-hover: 0 12px 34px rgba(var(--brand-primary-rgb), 0.7);
+
+  /*
+   * shadcn/ui semantic aliases, composed entirely from the tokens above so
+   * every generated primitive (button, input, dialog, ...) stays on the
+   * design system rather than introducing its own colors. One exception:
+   * DESIGN_TOKENS.md defines no error/destructive color, so --destructive
+   * below is a standard accessible red, not a transcribed token — flagged
+   * here for design review rather than invented silently.
+   */
+  --color-background: var(--color-neutral-100);
+  --color-foreground: var(--color-neutral-900);
+  --color-card: var(--color-neutral-100);
+  --color-card-foreground: var(--color-neutral-900);
+  --color-popover: var(--color-neutral-100);
+  --color-popover-foreground: var(--color-neutral-900);
+  --color-primary: var(--color-brand-primary);
+  --color-primary-foreground: var(--color-neutral-100);
+  --color-secondary: var(--color-neutral-200);
+  --color-secondary-foreground: var(--color-neutral-900);
+  --color-muted: var(--color-neutral-200);
+  --color-muted-foreground: var(--color-neutral-600);
+  --color-accent: var(--color-neutral-200);
+  --color-accent-foreground: var(--color-neutral-900);
+  --color-destructive: #dc2626; /* not in DESIGN_TOKENS.md — needs design sign-off */
+  --color-destructive-foreground: var(--color-neutral-100);
+  --color-border: var(--color-neutral-200);
+  --color-input: var(--color-neutral-200);
+  --color-ring: var(--color-brand-primary);
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--color-neutral-100);
+    color: var(--color-neutral-900);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+
+    .text-hero-title {
+      font-weight: 700;
+    }
+    .text-section-title {
+      font-weight: 700;
+    }
+    .text-block-title {
+      font-weight: 700;
+    }
+    .text-card-title {
+      font-weight: 600;
+    }
+    .text-body-lg {
+      font-weight: 400;
+    }
+    .text-body {
+      font-weight: 400;
+    }
+    .text-caption {
+      font-weight: 400;
+    }
+    .text-eyebrow {
+      font-weight: 600;
+    }
+  }
+}

@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+
+      - name: Lint (ruff check)
+        run: .venv/bin/ruff check .
+
+      - name: Format check (ruff format)
+        run: .venv/bin/ruff format --check .
+
+      - name: Type check (mypy, strict)
+        run: .venv/bin/mypy src
+
+      - name: Test (unit + integration + contract)
+        run: .venv/bin/pytest -q
+
+      # constitution: No Raw SQL outside the two documented exceptions
+      # (plan.md §Complexity Tracking — db/engine.py's PRAGMAs and the
+      # 0004 migration's append-only triggers).
+      - name: No undocumented raw SQL
+        run: |
+          if grep -rn '\.execute("' src/app --include=*.py | grep -v "db/engine.py"; then
+            echo "::error::Raw SQL found outside the two documented exceptions"
+            exit 1
+          fi
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (eslint — includes no-explicit-any and FSD import boundaries)
+        run: npm run lint
+
+      - name: Type check (tsc --noEmit, strict)
+        run: npm run typecheck
+
+      - name: Test (vitest)
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      # constitution: centralize axios in shared/api — no direct imports
+      # from UI components (Technology Stack & Constraints, Frontend
+      # API & Requests rule).
+      - name: No axios imports outside shared/api
+        run: |
+          if grep -rn "from 'axios'" src | grep -v "shared/api"; then
+            echo "::error::axios imported outside shared/api"
+            exit 1
+          fi

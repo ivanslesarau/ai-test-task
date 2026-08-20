@@ -1,0 +1,1031 @@
+openapi: 3.1.0
+info:
+  title: PracticePerfect — User Roles, Authorization & Super Admin User Management
+  version: 1.0.0
+  description: |
+    Contract for feature 001-user-roles-admin. Covers sign-in and session handling,
+    invitation-driven first password setup, self-service profile editing for all four roles,
+    and the Super Admin user directory with create, deactivate, reactivate, and erase.
+
+    Authentication is a session cookie (see securitySchemes). Every response body is a
+    Pydantic V2 model; no endpoint ever returns a database error, driver message, or stack
+    trace (FR-056).
+
+    Traceability: each operation carries `x-requirements` listing the spec requirements it
+    satisfies.
+servers:
+  - url: /api/v1
+    description: Versioned API root
+
+tags:
+  - name: auth
+    description: Sign-in, sign-out, session inspection, first-password setup
+  - name: me
+    description: Self-service profile for the signed-in account
+  - name: admin-users
+    description: Super Admin user directory and lifecycle actions
+  - name: media
+    description: Authenticated delivery of stored profile photos
+
+security:
+  - sessionCookie: []
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Sign in with email and password
+      operationId: login
+      security: []
+      x-requirements: [FR-008, FR-009, FR-010, FR-011, FR-013, FR-026]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: |
+            Signed in. Sets the session cookie and returns the current account summary.
+          headers:
+            Set-Cookie:
+              description: 'pp_session=<opaque token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800'
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CurrentUser' }
+        '401':
+          description: |
+            Credentials rejected. Returned identically for an unknown email, a wrong password,
+            and an account that has no password set yet, so the response cannot be used to
+            discover which emails are registered (FR-010).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: invalid_credentials
+                  message: Email or password is incorrect.
+        '403':
+          description: |
+            Credentials were correct but the account is not Active. Deliberately distinct from
+            401, because FR-010 requires this case to say so (FR-010, second clause).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: account_not_active
+                  message: Account deactivated. Contact support.
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: End the current session
+      operationId: logout
+      x-requirements: [FR-011]
+      responses:
+        '204':
+          description: Session revoked and cookie cleared. Idempotent.
+          headers:
+            Set-Cookie:
+              description: 'pp_session=; Max-Age=0'
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/session:
+    get:
+      tags: [auth]
+      summary: Describe the current session's account
+      operationId: getCurrentSession
+      x-requirements: [FR-018, FR-019]
+      description: |
+        The frontend calls this on load to decide what to render. Advances the session's
+        last-activity time, so it participates in the sliding inactivity window.
+      responses:
+        '200':
+          description: The signed-in account.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CurrentUser' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/setup-password/{token}:
+    get:
+      tags: [auth]
+      summary: Check whether a setup link is still usable
+      operationId: checkSetupInvitation
+      security: []
+      x-requirements: [FR-027]
+      description: |
+        Lets the set-password page show "this link has expired, request a new one" before the
+        person types a password. Returns only whether the link is usable and the masked email
+        it belongs to — never the account identifier or role.
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string, minLength: 32, maxLength: 128 }
+      responses:
+        '200':
+          description: Link is usable.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [email_hint, expires_at]
+                properties:
+                  email_hint:
+                    type: string
+                    description: Partially masked address, e.g. 'a**@example.org'.
+                    example: a**@example.org
+                  expires_at: { type: string, format: date-time }
+        '410':
+          description: Link is consumed, expired, superseded, or its account is not Active.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: invitation_not_usable
+                  message: This setup link is no longer valid. Request a new one.
+
+  /auth/setup-password:
+    post:
+      tags: [auth]
+      summary: Set the first password using a setup link
+      operationId: setupPassword
+      security: []
+      x-requirements: [FR-014, FR-026, FR-027]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token, password]
+              properties:
+                token: { type: string, minLength: 32, maxLength: 128 }
+                password: { $ref: '#/components/schemas/Password' }
+      responses:
+        '204':
+          description: |
+            Password set and the invitation consumed. No session is issued — the person signs
+            in normally, which proves the credential works.
+        '410':
+          description: Link is consumed, expired, superseded, or its account is not Active.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: |
+            Password rejected by policy — too short, or present in the breached-password list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+              example:
+                error:
+                  code: validation_failed
+                  message: One or more fields are invalid.
+                  fields:
+                    - field: password
+                      message: Password must be at least 12 characters.
+
+  /me/profile:
+    get:
+      tags: [me]
+      summary: Read the signed-in account's own profile
+      operationId: getOwnProfile
+      x-requirements: [FR-017, FR-031]
+      responses:
+        '200':
+          description: |
+            The profile, including the role-specific block. `editable` and `read_only` are
+            reported explicitly so the interface never has to hardcode which is which
+            (FR-031, FR-033).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OwnProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    patch:
+      tags: [me]
+      summary: Update the signed-in account's own profile
+      operationId: updateOwnProfile
+      x-requirements: [FR-017, FR-032, FR-033, FR-036]
+      description: |
+        Accepts only the fields editable for the requester's role. Submitting `email`, `role`,
+        `status`, `created_at`, or `skill_level` is rejected with 422 rather than silently
+        ignored, so a mistaken client learns of its error (FR-033).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OwnProfileUpdate' }
+      responses:
+        '200':
+          description: Updated profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OwnProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403':
+          description: The account is Deleted and cannot be edited (FR-048).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /me/profile/photo:
+    put:
+      tags: [me]
+      summary: Upload or replace the signed-in account's photo
+      operationId: uploadOwnPhoto
+      x-requirements: [FR-034]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: JPEG, PNG, or WebP, at most 5 MB.
+      responses:
+        '200':
+          description: |
+            Stored. Returns both URLs. Any previously stored original and thumbnail are deleted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PhotoUrls' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '413':
+          description: File exceeds 5 MB. The existing photo is unchanged.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '415':
+          description: |
+            Not a decodable JPEG, PNG, or WebP. Determined by decoding the bytes, not by the
+            declared content type or the filename. The existing photo is unchanged.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: unsupported_image
+                  message: Upload a JPEG, PNG, or WebP image no larger than 5 MB.
+    delete:
+      tags: [me]
+      summary: Remove the signed-in account's photo
+      operationId: deleteOwnPhoto
+      x-requirements: [FR-035]
+      responses:
+        '204':
+          description: Removed; the default avatar now applies. Idempotent.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /media/photos/{key}:
+    get:
+      tags: [media]
+      summary: Fetch a stored profile photo
+      operationId: getPhoto
+      x-requirements: [FR-034, FR-035]
+      description: |
+        Served through the application rather than a static mount so that the session check
+        lives in one place and the storage layout stays private.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string, maxLength: 128 }
+        - name: variant
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [original, thumb]
+            default: original
+      responses:
+        '200':
+          description: The image bytes.
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/users:
+    get:
+      tags: [admin-users]
+      summary: Browse the platform-wide user directory
+      operationId: listUsers
+      x-requirements: [FR-016, FR-051, FR-052, SC-006]
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - name: q
+          in: query
+          description: Case-insensitive partial match on name or email.
+          schema: { type: string, maxLength: 200 }
+        - name: role
+          in: query
+          schema: { $ref: '#/components/schemas/UserRole' }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/AccountStatus' }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [created_at_desc, created_at_asc, name_asc, name_desc]
+            default: created_at_desc
+      responses:
+        '200':
+          description: One page of the directory.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserPage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admin-users]
+      summary: Create an account and send its setup invitation
+      operationId: createUser
+      x-requirements: [FR-021, FR-022, FR-023, FR-024, FR-025, FR-029, FR-030]
+      description: |
+        Creates the account with status Active and no password, creates the profile and the
+        role detail row matching the role, writes the audit entry, and sends the invitation —
+        all in one transaction, so a failure leaves no partial account behind (FR-024).
+
+        `business_name` is required when `role` is `trainer` and rejected for other roles.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUserRequest' }
+      responses:
+        '201':
+          description: |
+            Created and invited. `invitation_sent` reports whether delivery succeeded; when
+            false, the account still exists and the Super Admin should re-invite (FR-028).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreatedUser' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: The email already belongs to an account in any status (FR-004, FR-023).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: email_already_registered
+                  message: An account with this email address already exists.
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /admin/users/{user_id}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [admin-users]
+      summary: Read one account in full
+      operationId: getUser
+      x-requirements: [FR-016, FR-017, FR-051]
+      responses:
+        '200':
+          description: |
+            The account with its profile and role detail. Includes `version`, which the caller
+            must echo on any subsequent status change (FR-010 concurrency, R-10).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserDetail' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/users/{user_id}/deactivate:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      tags: [admin-users]
+      summary: Deactivate an account
+      operationId: deactivateUser
+      x-requirements: [FR-037, FR-038, FR-041, FR-042, FR-012, SC-007]
+      description: |
+        Moves an Active account to Inactive, revoking every session it holds in the same
+        transaction. Refused when the target is the caller, or the last Active Super Admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatusChangeRequest' }
+      responses:
+        '200':
+          description: Deactivated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserDetail' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/StatusConflict' }
+        '422':
+          description: |
+            The action is not permitted for this target: the account is not Active, it is the
+            caller's own account, or it is the last Active Super Admin (FR-041).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                lastSuperAdmin:
+                  value:
+                    error:
+                      code: last_super_admin
+                      message: This is the only active Super Admin and cannot be deactivated.
+                selfAction:
+                  value:
+                    error:
+                      code: self_action_forbidden
+                      message: You cannot deactivate your own account.
+
+  /admin/users/{user_id}/reactivate:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      tags: [admin-users]
+      summary: Reactivate an inactive account
+      operationId: reactivateUser
+      x-requirements: [FR-040, FR-042]
+      description: |
+        Returns an Inactive account to Active with its existing password and profile intact.
+        Refused for a Deleted account, because erasure is terminal (FR-048).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatusChangeRequest' }
+      responses:
+        '200':
+          description: Reactivated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserDetail' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/StatusConflict' }
+        '422':
+          description: The account is not Inactive, or it is Deleted and cannot be restored.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: erasure_is_permanent
+                  message: This account was erased and cannot be reactivated.
+
+  /admin/users/{user_id}/erase:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      tags: [admin-users]
+      summary: Permanently erase an account's personal information
+      operationId: eraseUser
+      x-requirements: [FR-043, FR-044, FR-045, FR-046, FR-047, FR-048, FR-049, FR-041]
+      description: |
+        Irreversible. Anonymizes the account in place, revokes its sessions, supersedes any
+        unconsumed invitation, deletes its stored photo files, and writes the compliance
+        record — one transaction. Every historical record referencing the account survives
+        untouched, so reporting totals do not move (FR-046, FR-047).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EraseUserRequest' }
+      responses:
+        '200':
+          description: Erased. The returned account already shows its anonymized values.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserDetail' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/StatusConflict' }
+        '422':
+          description: |
+            Already Deleted, the caller's own account, or the last Active Super Admin
+            (FR-041, FR-048).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/users/{user_id}/reinvite:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      tags: [admin-users]
+      summary: Issue a fresh setup invitation
+      operationId: reinviteUser
+      x-requirements: [FR-028]
+      description: |
+        Valid only for an Active account that has never set a password. Supersedes any
+        outstanding invitation, so exactly one link is live at a time.
+      responses:
+        '200':
+          description: A new invitation was issued.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [invitation_sent, expires_at]
+                properties:
+                  invitation_sent: { type: boolean }
+                  expires_at: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: The account already has a password, or is not Active.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/users/{user_id}/audit:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [admin-users]
+      summary: Read the audit trail for one account
+      operationId: listUserAudit
+      x-requirements: [FR-054, FR-055]
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Audit entries where this account is the target, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditPage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/erasure-records/{user_id}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [admin-users]
+      summary: Read the compliance record for an erased account
+      operationId: getErasureRecord
+      x-requirements: [FR-049]
+      description: |
+        The only route that exposes an erased account's original identity. Super Admin only,
+        and never joined into any account view.
+      responses:
+        '200':
+          description: The compliance record.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErasureRecord' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No erasure record exists for this account.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: pp_session
+      description: |
+        Opaque server-side session token. HttpOnly, Secure, SameSite=Lax. Sliding 7-day
+        inactivity expiry. Revoked on sign-out and the moment the account leaves Active
+        status (FR-011, FR-012).
+
+  parameters:
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    Unauthenticated:
+      description: No valid session, or the session's account is no longer Active (FR-018).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: not_authenticated
+              message: Sign in to continue.
+    Forbidden:
+      description: |
+        The session is valid but the role may not perform this action. Recorded as a
+        `permission_denied` audit entry (FR-020).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: forbidden
+              message: Your role does not permit this action.
+    NotFound:
+      description: No such resource.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ValidationFailed:
+      description: |
+        One or more fields failed validation. Every offending field is listed, so the
+        interface can mark each one rather than showing a single generic failure (FR-022).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ValidationError' }
+    RateLimited:
+      description: |
+        Too many failed sign-in attempts for this email or from this address. Retry after the
+        stated interval; access resumes automatically (FR-013, SC-011).
+      headers:
+        Retry-After:
+          description: Seconds until attempts are accepted again.
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: too_many_attempts
+              message: Too many attempts. Try again in a few minutes.
+    StatusConflict:
+      description: |
+        The account changed since it was read. The caller's `version` did not match. Re-read
+        and retry (R-10).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: stale_version
+              message: This account was changed by someone else. Reload and try again.
+
+  schemas:
+    UserRole:
+      type: string
+      enum: [super_admin, trainer, coach, player_parent]
+
+    AccountStatus:
+      type: string
+      enum: [active, inactive, deleted]
+
+    Password:
+      type: string
+      minLength: 12
+      maxLength: 128
+      format: password
+      description: At least 12 characters and not present in the breached-password list (FR-014).
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      description: |
+        The single error envelope for every failure. Carries a stable machine-readable `code`
+        and a message safe to show a user. Never carries internal detail (FR-056).
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: { type: string, example: forbidden }
+            message: { type: string }
+
+    ValidationError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, fields]
+          properties:
+            code: { type: string, enum: [validation_failed] }
+            message: { type: string }
+            fields:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [field, message]
+                properties:
+                  field: { type: string, example: phone }
+                  message: { type: string, example: Enter a valid phone number. }
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 320 }
+        password: { type: string, minLength: 1, maxLength: 128 }
+
+    CurrentUser:
+      type: object
+      additionalProperties: false
+      required: [id, email, role, status, first_name, last_name, photo_url]
+      description: The minimum the interface needs to render for a signed-in person.
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role: { $ref: '#/components/schemas/UserRole' }
+        status: { $ref: '#/components/schemas/AccountStatus' }
+        first_name: { type: string }
+        last_name: { type: string }
+        photo_url:
+          type: [string, 'null']
+          description: Null when no photo is stored; the interface shows the default avatar.
+
+    PhotoUrls:
+      type: object
+      additionalProperties: false
+      required: [photo_url, thumbnail_url]
+      properties:
+        photo_url: { type: string }
+        thumbnail_url: { type: string }
+
+    TrainerDetail:
+      type: object
+      additionalProperties: false
+      required: [business_name]
+      properties:
+        business_name: { type: string, minLength: 1, maxLength: 200 }
+        address: { type: [string, 'null'], maxLength: 500 }
+        website: { type: [string, 'null'], maxLength: 500, format: uri }
+        description: { type: [string, 'null'], maxLength: 2000 }
+
+    CoachDetail:
+      type: object
+      additionalProperties: false
+      required: [is_publicly_visible]
+      properties:
+        bio: { type: [string, 'null'], maxLength: 2000 }
+        credentials: { type: [string, 'null'], maxLength: 1000 }
+        certifications: { type: [string, 'null'], maxLength: 1000 }
+        is_publicly_visible: { type: boolean }
+
+    PlayerParentDetail:
+      type: object
+      additionalProperties: false
+      properties:
+        school: { type: [string, 'null'], maxLength: 200 }
+        jersey_number: { type: [string, 'null'], maxLength: 10 }
+        skill_level:
+          type: [string, 'null']
+          readOnly: true
+          description: Assigned by a trainer in a later feature. Never writable here (FR-007, FR-033).
+        emergency_contact_name: { type: [string, 'null'], maxLength: 200 }
+        emergency_contact_phone: { type: [string, 'null'], maxLength: 32 }
+        emergency_contact_relation: { type: [string, 'null'], maxLength: 100 }
+
+    RoleDetail:
+      description: |
+        The role-specific block. Discriminated by the account's role, so the frontend narrows
+        it with a type guard rather than reaching for `any` (constitution Principle II).
+      oneOf:
+        - $ref: '#/components/schemas/TrainerDetail'
+        - $ref: '#/components/schemas/CoachDetail'
+        - $ref: '#/components/schemas/PlayerParentDetail'
+        - type: 'null'
+          description: Super Admin accounts carry no role detail block.
+
+    OwnProfile:
+      type: object
+      additionalProperties: false
+      required: [id, email, role, status, created_at, first_name, last_name, phone, photo_url, thumbnail_url, role_detail, editable_fields]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email, readOnly: true }
+        role: { $ref: '#/components/schemas/UserRole' }
+        status: { $ref: '#/components/schemas/AccountStatus' }
+        created_at: { type: string, format: date-time, readOnly: true }
+        first_name: { type: string }
+        last_name: { type: string }
+        phone: { type: [string, 'null'] }
+        photo_url: { type: [string, 'null'] }
+        thumbnail_url: { type: [string, 'null'] }
+        role_detail: { $ref: '#/components/schemas/RoleDetail' }
+        editable_fields:
+          type: array
+          description: |
+            Names of the fields this role may change. Everything else the payload carries is
+            read-only. Reported by the server so the interface cannot drift from the rule
+            the server actually enforces (FR-031, FR-033).
+          items: { type: string }
+          example: [first_name, last_name, phone, school, jersey_number]
+
+    OwnProfileUpdate:
+      type: object
+      additionalProperties: false
+      description: |
+        Every field optional — a partial update. Submitting a field not editable for the
+        requester's role is a 422, not a silent no-op (FR-033).
+      properties:
+        first_name: { type: string, minLength: 1, maxLength: 100 }
+        last_name: { type: string, minLength: 1, maxLength: 100 }
+        phone: { type: [string, 'null'], maxLength: 32 }
+        business_name: { type: string, minLength: 1, maxLength: 200 }
+        address: { type: [string, 'null'], maxLength: 500 }
+        website: { type: [string, 'null'], maxLength: 500 }
+        description: { type: [string, 'null'], maxLength: 2000 }
+        bio: { type: [string, 'null'], maxLength: 2000 }
+        credentials: { type: [string, 'null'], maxLength: 1000 }
+        certifications: { type: [string, 'null'], maxLength: 1000 }
+        is_publicly_visible: { type: boolean }
+        school: { type: [string, 'null'], maxLength: 200 }
+        jersey_number: { type: [string, 'null'], maxLength: 10 }
+        emergency_contact_name: { type: [string, 'null'], maxLength: 200 }
+        emergency_contact_phone: { type: [string, 'null'], maxLength: 32 }
+        emergency_contact_relation: { type: [string, 'null'], maxLength: 100 }
+
+    CreateUserRequest:
+      type: object
+      additionalProperties: false
+      required: [role, email, first_name, last_name, phone]
+      properties:
+        role: { $ref: '#/components/schemas/UserRole' }
+        email: { type: string, format: email, maxLength: 320 }
+        first_name: { type: string, minLength: 1, maxLength: 100 }
+        last_name: { type: string, minLength: 1, maxLength: 100 }
+        phone: { type: string, maxLength: 32 }
+        business_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Required when role is trainer; rejected for any other role (FR-021).
+
+    CreatedUser:
+      type: object
+      additionalProperties: false
+      required: [user, invitation_sent, invitation_expires_at]
+      properties:
+        user: { $ref: '#/components/schemas/UserDetail' }
+        invitation_sent:
+          type: boolean
+          description: |
+            False when the account was created but the email could not be delivered. The
+            Super Admin should re-invite (FR-028).
+        invitation_expires_at: { type: string, format: date-time }
+
+    UserSummary:
+      type: object
+      additionalProperties: false
+      required: [id, email, first_name, last_name, role, status, created_at, has_password]
+      description: One row of the directory (FR-051).
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        first_name: { type: string }
+        last_name: { type: string }
+        role: { $ref: '#/components/schemas/UserRole' }
+        status: { $ref: '#/components/schemas/AccountStatus' }
+        created_at: { type: string, format: date-time }
+        thumbnail_url: { type: [string, 'null'] }
+        has_password:
+          type: boolean
+          description: |
+            False for an invited account that has not completed setup. Lets the directory
+            offer Re-invite on exactly the rows where it applies (FR-053).
+
+    UserDetail:
+      allOf:
+        - $ref: '#/components/schemas/UserSummary'
+        - type: object
+          additionalProperties: false
+          required: [version, phone, role_detail, last_login_at, available_actions]
+          properties:
+            version:
+              type: integer
+              description: Echo this on any status change; a mismatch is a 409 (R-10).
+            phone: { type: [string, 'null'] }
+            photo_url: { type: [string, 'null'] }
+            role_detail: { $ref: '#/components/schemas/RoleDetail' }
+            last_login_at: { type: [string, 'null'], format: date-time }
+            available_actions:
+              type: array
+              description: |
+                Actions valid for this account's current status, so the directory shows only
+                those (FR-053). Advisory for rendering; the server enforces regardless.
+              items:
+                type: string
+                enum: [deactivate, reactivate, erase, reinvite]
+
+    UserPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, page_size, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/UserSummary' }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+
+    StatusChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          type: integer
+          description: The version observed when the account was read (R-10).
+
+    EraseUserRequest:
+      type: object
+      additionalProperties: false
+      required: [version, reason]
+      properties:
+        version: { type: integer }
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: Retained in the compliance record (FR-044, FR-049).
+
+    AuditEntry:
+      type: object
+      additionalProperties: false
+      required: [id, action, occurred_at]
+      properties:
+        id: { type: string, format: uuid }
+        action:
+          type: string
+          enum: [user_created, invitation_issued, invitation_consumed, user_deactivated, user_reactivated, user_erased, permission_denied]
+        actor:
+          type: [object, 'null']
+          additionalProperties: false
+          required: [id, display_name]
+          properties:
+            id: { type: string, format: uuid }
+            display_name: { type: string }
+        reason: { type: [string, 'null'] }
+        detail: { type: [string, 'null'] }
+        occurred_at: { type: string, format: date-time }
+
+    AuditPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, page_size, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AuditEntry' }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+
+    ErasureRecord:
+      type: object
+      additionalProperties: false
+      required: [user_id, original_email, original_first_name, original_last_name, erased_by, reason, erased_at]
+      properties:
+        user_id: { type: string, format: uuid }
+        original_email: { type: string }
+        original_first_name: { type: string }
+        original_last_name: { type: string }
+        erased_by:
+          type: object
+          additionalProperties: false
+          required: [id, display_name]
+          properties:
+            id: { type: string, format: uuid }
+            display_name: { type: string }
+        reason: { type: string }
+        erased_at: { type: string, format: date-time }
