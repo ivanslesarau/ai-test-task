@@ -44,6 +44,14 @@ references.
 Coverage counts at time of validation: 56 functional requirements, 12 success criteria, 46
 Given/When/Then acceptance scenarios across 5 user stories, plus 11 edge cases.
 
+**Revalidated 2026-08-25** after the bug-fix slice's approved amendments: **64 functional
+requirements and 14 success criteria**. FR-057 to FR-064 and SC-013 to SC-014 were added to give the
+six reported post-implementation defects requirement backing, as Principle I requires. All 16
+checklist items were re-scanned and still pass — the new requirements name no library, endpoint, or
+file layout, and each is measurable through SC-013, SC-014, or an existing acceptance scenario. The
+technical decisions they rest on live in `plan.md` §Post-Implementation Technical Decisions
+(D-01 to D-06), not in the specification.
+
 Every functional requirement traces to at least one acceptance scenario or success criterion, and
 each of the four requested epic stories maps to a user story here:
 

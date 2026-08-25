@@ -1,25 +1,34 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: TEMPLATE (unfilled placeholders) -> 1.0.0
-Bump rationale: Initial ratification. The prior file was the unfilled core scaffold with no
-  concrete governance, so this is an initial adoption rather than an amendment.
+Version change: 1.0.0 -> 1.1.0
+Bump rationale: MINOR. A new principle (VI. Null-Not-Empty Data Contract) was added and the
+  Technology Stack & Constraints section was materially expanded to record the ratified initial
+  stack with concrete version floors and tooling. No existing principle was removed or redefined,
+  so nothing previously compliant becomes violating by redefinition.
 
-Modified principles (placeholder -> concrete):
-  - [PRINCIPLE_1_NAME] -> I. Spec-Driven Development (NON-NEGOTIABLE)
-  - [PRINCIPLE_2_NAME] -> II. End-to-End Type Safety (NON-NEGOTIABLE)
-  - [PRINCIPLE_3_NAME] -> III. Layered Backend Architecture
-  - [PRINCIPLE_4_NAME] -> IV. Feature-Sliced Frontend Architecture
-  - [PRINCIPLE_5_NAME] -> V. Async-First Persistence & Contained Failures
+Modified principles:
+  - II. End-to-End Type Safety - boundary-parity bullet now cross-references Principle VI for
+    optionality. No principle renamed or removed.
 
 Added sections:
-  - Technology Stack & Constraints (fills [SECTION_2_NAME]/[SECTION_2_CONTENT])
-  - Development Workflow & Quality Gates (fills [SECTION_3_NAME]/[SECTION_3_CONTENT])
-  - Governance (concrete amendment, versioning, and compliance rules)
+  - VI. Null-Not-Empty Data Contract (NON-NEGOTIABLE) - empty-string-to-null normalization before
+    submit on the frontend, explicit `str | None` Pydantic schemas, and explicit-null-clears-the-
+    column behavior through the service and repository layers.
+  - Technology Stack & Constraints - "ratified initial stack" entries for backend, frontend, and
+    tooling, capturing the as-built dependency set with version floors.
+  - Development Workflow & Quality Gates - two new merge gates covering payload normalization and
+    field-clearing test coverage.
 
 Removed sections: none. Heading hierarchy preserved from the resolved template.
 
-Follow-up TODOs: none. All placeholder tokens resolved.
+Follow-up TODOs:
+  - TODO(NULL_NORMALIZATION_HELPER): The frontend has no shared empty-string-to-null helper yet.
+    Principle VI requires exactly one in `shared/lib`; existing TanStack Form submit handlers MUST
+    be migrated onto it. Track as a task in the active feature's tasks.md.
+  - TODO(CHART_LIBRARY): Chart.js is designated for dashboard visualizations but is not yet an
+    installed dependency, since no dashboard epic has been implemented. Recorded as a pinned
+    forward decision, not as as-built state.
 -->
 
 # PracticePerfect Constitution
@@ -46,7 +55,8 @@ approved plan produces architecture that cannot absorb the next epic without rew
   request, response, and internal data-transfer models MUST be Pydantic V2 models; validation and
   serialization MUST go through Pydantic rather than hand-written dict manipulation.
 - Boundary parity: Client-side API response types MUST mirror the backend Pydantic schemas, and
-  form validation schemas MUST encode the same constraints the backend enforces.
+  form validation schemas MUST encode the same constraints the backend enforces. Optionality is
+  part of that parity and is governed by Principle VI.
 
 Rationale: `any` and untyped dicts defer contract breaks to runtime, where a multi-role permission
 system fails as data leakage instead of as a compile error.
@@ -105,14 +115,64 @@ bugs, and FSD's one-way imports keep eight epics from fusing into one inseparabl
 Rationale: Sync calls on the event loop serialize the entire API under load, and leaked driver
 errors expose schema internals to unauthenticated callers.
 
+### VI. Null-Not-Empty Data Contract (NON-NEGOTIABLE)
+
+An absent optional value is spelled `null` at every layer. The empty string is a rendering artifact
+of React controlled inputs; it MUST NOT cross the network boundary and MUST NOT reach a database
+column.
+
+- **Frontend — payload normalization**: React controlled inputs initialize optional fields to `""`.
+  Every TanStack Form submit handler MUST pass its values through the single shared normalization
+  helper in `shared/lib` before the payload reaches `axios`. That helper MUST convert any string
+  that is empty or contains only whitespace to `null`, recursing through nested objects and arrays.
+  Values that are not empty-or-whitespace strings MUST pass through unchanged; trimming of real
+  values, if wanted, belongs in the field's Zod schema, not in the normalizer. Per-form ad-hoc
+  conversion, inline ternaries at the call site, and duplicate helpers are forbidden — there is
+  exactly one normalizer. An empty string MUST NOT be sent to the backend for an optional field
+  under any circumstance.
+- **Backend — nullable schemas are explicit**: Pydantic schemas MUST declare nullable fields as
+  `str | None` (equivalently `Optional[str]`). A bare `str` field standing in for a nullable column,
+  or optionality implied only by a default, is a violation. A nullable string field MUST also reject
+  the empty string — constrain it with `min_length=1` so `""` returns a 422 validation error instead
+  of being persisted.
+- **Backend — an explicit null clears the value**: Update schemas (PATCH/PUT) MUST distinguish an
+  omitted field from a field explicitly set to `null`. Services MUST read submitted fields via
+  `model_dump(exclude_unset=True)`. A key present with value `None` MUST propagate to the
+  repository, which MUST assign `None` to the mapped attribute so the column becomes SQL `NULL`.
+  Repositories MUST NOT skip `None` values, coerce them to `""`, or retain the previous value. Keys
+  absent from the payload MUST leave their columns untouched.
+- **Storage invariant**: No nullable text column may hold `""`. Data arriving from any other source
+  — imports, seeds, migrations, CLI commands — MUST be normalized to `null` at its entry boundary.
+
+Rationale: Two spellings of "no value" force every downstream reader — query filters, dashboard
+aggregates, `COALESCE`, and every `if (!value)` check — to handle both, and the two spellings
+diverge silently. Worse, without the `exclude_unset` distinction a user cannot clear an optional
+field at all: the API accepts the request and reports success while the old value stays in the
+database.
+
 ## Technology Stack & Constraints
 
-The stack is fixed. Adding, replacing, or removing an entry requires a constitution amendment.
+The stack below is the ratified initial stack. Versions are minimum floors. Adding, replacing, or
+removing an entry — or raising a major version — requires a constitution amendment.
 
-**Backend**: Python, FastAPI, SQLAlchemy 2.0 (async), SQLite, Pydantic V2, pydantic-settings.
+**Backend (ratified initial stack)**: Python >= 3.13; FastAPI >= 0.115 on uvicorn[standard] >= 0.32;
+SQLAlchemy >= 2.0.36 async with aiosqlite >= 0.20 over SQLite; Alembic >= 1.14 for migrations;
+Pydantic >= 2.9 with pydantic-settings >= 2.6 and email-validator >= 2.2; pwdlib[argon2] >= 0.2.1
+for password hashing; python-multipart >= 0.0.12 and pillow >= 11.0 for uploads and image
+processing; aiosmtplib >= 3.0 for outbound mail; phonenumbers >= 8.13 for phone validation.
 
-**Frontend**: TypeScript, React via Vite, TanStack Router, TanStack Query, TanStack Forms, Zod,
-Zustand, axios, Tailwind CSS with shadcn/ui, Chart.js for dashboard visualizations.
+**Frontend (ratified initial stack)**: TypeScript >= 5.7 in strict mode on React >= 19, built by
+Vite >= 6; TanStack Router >= 1.87, TanStack Query >= 5.59, TanStack Form
+(`@tanstack/react-form`) >= 1.0; Zod >= 3.23 for schemas; Zustand >= 5 for client UI state; axios
+>= 1.7 for transport; Tailwind CSS >= 4 via `@tailwindcss/vite` with shadcn/ui over `radix-ui`,
+plus `class-variance-authority`, `clsx`, `tailwind-merge`, and `lucide-react`; `next-themes` for
+theme state and `sonner` for toasts.
+
+**Tooling & tests (ratified initial stack)**: Backend — ruff >= 0.7 (line length 100, target
+py313), mypy >= 1.13 with `disallow_untyped_defs` and `warn_return_any` enabled, pytest >= 8.3 with
+pytest-asyncio in auto mode, httpx >= 0.27. Frontend — ESLint >= 9 with typescript-eslint and
+`eslint-plugin-boundaries` enforcing FSD import direction, vitest >= 3.2 with jsdom, Testing
+Library, and msw >= 2.6 for HTTP mocking.
 
 Additional constraints:
 
@@ -122,19 +182,27 @@ Additional constraints:
   listing every required key MUST be kept current.
 - **Charts**: Dashboard visualizations MUST use Chart.js behind a typed `shared/ui` wrapper
   component; chart datasets MUST be derived from TanStack Query data, never from a Zustand store.
+  Chart.js is a pinned forward decision and is not yet installed — the epic that introduces
+  dashboards adds it without a further amendment.
 - **Design tokens**: Styling MUST use the tokens in `Task/designs/DESIGN_TOKENS.md` through Tailwind
   configuration and CSS custom properties. Ad-hoc hex colors, font sizes, and spacing values in
   components are forbidden.
-- **Migrations**: Schema changes MUST ship as versioned migrations reviewed alongside the code that
-  requires them. Editing a database by hand is not a schema change.
+- **Migrations**: Schema changes MUST ship as versioned Alembic migrations reviewed alongside the
+  code that requires them. Editing a database by hand is not a schema change.
 
 ## Development Workflow & Quality Gates
 
 1. Every feature starts from an epic in `Task/Epics/` and proceeds through `/speckit-specify`,
    `/speckit-plan`, `/speckit-tasks`, then `/speckit-implement`.
 2. A change is mergeable only when all gates pass:
-   - Backend: strict type checking clean; no raw SQL; no sync DB calls; layer boundaries respected.
-   - Frontend: `tsc --noEmit` clean with zero `any`; lint clean; FSD import direction respected.
+   - Backend: mypy clean under the configured strict flags; ruff clean; no raw SQL; no sync DB
+     calls; layer boundaries respected.
+   - Frontend: `tsc -b --noEmit` clean with zero `any`; ESLint clean, including the boundaries rule.
+   - Nullable fields: every new or changed optional field declares `str | None` with `min_length=1`,
+     and every TanStack Form submit path routes through the shared normalizer (Principle VI).
+   - Field clearing: any endpoint accepting a nullable field MUST have a test that sends an explicit
+     `null` and asserts the persisted column is `NULL` afterwards, plus a test that omits the key
+     and asserts the column is unchanged.
    - Tests covering the acceptance criteria of the implemented tasks pass.
 3. Reviews MUST verify constitution compliance explicitly, not only correctness. A reviewer who
    finds a violation MUST block the change or record an approved exception (see Governance).
@@ -167,4 +235,4 @@ features MUST be resolved either by fixing the code or by amending this constitu
 with this constitution; if the two disagree, this constitution governs and `CLAUDE.md` MUST be
 corrected.
 
-**Version**: 1.0.0 | **Ratified**: 2026-08-19 | **Last Amended**: 2026-08-19
+**Version**: 1.1.0 | **Ratified**: 2026-08-19 | **Last Amended**: 2026-08-20

@@ -770,12 +770,20 @@ components:
         last_name: { type: string }
         photo_url:
           type: [string, 'null']
-          description: Null when no photo is stored; the interface shows the default avatar.
+          description: |
+            API-relative path, resolved against this document's server base path. A client
+            rendering it in a DOM `src` MUST prefix its own API base URL. Null when no photo is
+            stored; the interface shows the default avatar.
 
     PhotoUrls:
       type: object
       additionalProperties: false
       required: [photo_url, thumbnail_url]
+      description: |
+        Both are API-relative paths, resolved against this document's server base path — not
+        absolute URLs and not paths relative to the web application's own origin. A client
+        rendering either in a DOM `src` MUST prefix its API base URL; requests issued through the
+        API client resolve without further work.
       properties:
         photo_url: { type: string }
         thumbnail_url: { type: string }
@@ -838,8 +846,8 @@ components:
         first_name: { type: string }
         last_name: { type: string }
         phone: { type: [string, 'null'] }
-        photo_url: { type: [string, 'null'] }
-        thumbnail_url: { type: [string, 'null'] }
+        photo_url: { type: [string, 'null'], description: API-relative; see PhotoUrls. }
+        thumbnail_url: { type: [string, 'null'], description: API-relative; see PhotoUrls. }
         role_detail: { $ref: '#/components/schemas/RoleDetail' }
         editable_fields:
           type: array
@@ -856,23 +864,28 @@ components:
       description: |
         Every field optional — a partial update. Submitting a field not editable for the
         requester's role is a 422, not a silent no-op (FR-033).
+
+        An omitted key leaves its stored value untouched. A key present with value `null` clears
+        the stored value. The empty string is not a way to say "no value" and is rejected with a
+        422 naming the field (FR-059). `first_name` and `last_name` may be omitted but may not be
+        sent as `null` — both are required.
       properties:
         first_name: { type: string, minLength: 1, maxLength: 100 }
         last_name: { type: string, minLength: 1, maxLength: 100 }
-        phone: { type: [string, 'null'], maxLength: 32 }
+        phone: { type: [string, 'null'], minLength: 1, maxLength: 32 }
         business_name: { type: string, minLength: 1, maxLength: 200 }
-        address: { type: [string, 'null'], maxLength: 500 }
-        website: { type: [string, 'null'], maxLength: 500 }
-        description: { type: [string, 'null'], maxLength: 2000 }
-        bio: { type: [string, 'null'], maxLength: 2000 }
-        credentials: { type: [string, 'null'], maxLength: 1000 }
-        certifications: { type: [string, 'null'], maxLength: 1000 }
+        address: { type: [string, 'null'], minLength: 1, maxLength: 500 }
+        website: { type: [string, 'null'], minLength: 1, maxLength: 500 }
+        description: { type: [string, 'null'], minLength: 1, maxLength: 2000 }
+        bio: { type: [string, 'null'], minLength: 1, maxLength: 2000 }
+        credentials: { type: [string, 'null'], minLength: 1, maxLength: 1000 }
+        certifications: { type: [string, 'null'], minLength: 1, maxLength: 1000 }
         is_publicly_visible: { type: boolean }
-        school: { type: [string, 'null'], maxLength: 200 }
-        jersey_number: { type: [string, 'null'], maxLength: 10 }
-        emergency_contact_name: { type: [string, 'null'], maxLength: 200 }
-        emergency_contact_phone: { type: [string, 'null'], maxLength: 32 }
-        emergency_contact_relation: { type: [string, 'null'], maxLength: 100 }
+        school: { type: [string, 'null'], minLength: 1, maxLength: 200 }
+        jersey_number: { type: [string, 'null'], minLength: 1, maxLength: 10 }
+        emergency_contact_name: { type: [string, 'null'], minLength: 1, maxLength: 200 }
+        emergency_contact_phone: { type: [string, 'null'], minLength: 1, maxLength: 32 }
+        emergency_contact_relation: { type: [string, 'null'], minLength: 1, maxLength: 100 }
 
     CreateUserRequest:
       type: object
@@ -883,7 +896,14 @@ components:
         email: { type: string, format: email, maxLength: 320 }
         first_name: { type: string, minLength: 1, maxLength: 100 }
         last_name: { type: string, minLength: 1, maxLength: 100 }
-        phone: { type: string, maxLength: 32 }
+        phone:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: |
+            Must parse as a real telephone number and is stored normalized to E.164 — the same
+            rule the profile save applies (FR-022, data-model.md §12). A 422 attributed to
+            `phone` is returned when it does not.
         business_name:
           type: string
           minLength: 1
@@ -916,7 +936,7 @@ components:
         role: { $ref: '#/components/schemas/UserRole' }
         status: { $ref: '#/components/schemas/AccountStatus' }
         created_at: { type: string, format: date-time }
-        thumbnail_url: { type: [string, 'null'] }
+        thumbnail_url: { type: [string, 'null'], description: API-relative; see PhotoUrls. }
         has_password:
           type: boolean
           description: |
@@ -934,7 +954,7 @@ components:
               type: integer
               description: Echo this on any status change; a mismatch is a 409 (R-10).
             phone: { type: [string, 'null'] }
-            photo_url: { type: [string, 'null'] }
+            photo_url: { type: [string, 'null'], description: API-relative; see PhotoUrls. }
             role_detail: { $ref: '#/components/schemas/RoleDetail' }
             last_login_at: { type: [string, 'null'], format: date-time }
             available_actions:

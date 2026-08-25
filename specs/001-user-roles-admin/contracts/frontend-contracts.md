@@ -118,6 +118,13 @@ rather than duplicated in Zod:
 The forms therefore map a 422 `fields` array onto their own field errors. That mapping is shared, in
 `shared/api`, because every form needs it.
 
+**Two obligations every form carries**, in addition to its own schema:
+
+| Obligation | Helper | Rule |
+|---|---|---|
+| Payload normalization | `shared/lib/normalize-payload.ts` | Every submit handler passes its values through `normalizeEmptyToNull` before `axios` sees them. Empty and whitespace-only strings become `null`; nothing else changes. Exactly one such helper exists (constitution Principle VI) — a second one, or an inline ternary at a call site, is a defect. |
+| Error surfacing | `shared/lib/form-errors.ts` | Field errors render through `fieldErrorText`, which normalizes both Standard-Schema issue objects and plain strings. Server 422 field errors are injected with `form.setErrorMap({ onServer: toServerErrorMap(error) })`. No form reads `ApiError.fields` directly. |
+
 ---
 
 ## 4. State ownership
@@ -161,6 +168,7 @@ shared/api/
 ├── client.ts          # the single axios instance: baseURL '/api/v1', withCredentials: true
 ├── interceptors.ts    # response interceptor → normalized error
 ├── errors.ts          # ApiError class, isApiError guard, field-error extraction
+├── media.ts           # resolveMediaUrl(): API-relative media path → DOM-usable URL
 └── types.ts           # generated/maintained types matching openapi.yaml schemas
 ```
 
@@ -191,3 +199,49 @@ the interface drift from what the server enforces:
 | `editable_fields` | `GET /me/profile` | The read-only rule is FR-033's, enforced server-side. A local copy would silently diverge. |
 | `available_actions` | `GET /admin/users/{id}` | Which of deactivate/reactivate/erase/reinvite is valid depends on status *and* `has_password`. One rule, one place. |
 | `version` | `GET /admin/users/{id}` | Optimistic-concurrency token (R-10). Must be echoed exactly as received, never incremented locally. |
+
+And one value the frontend **must** derive rather than use as received:
+
+| Value | Source | Why it must be resolved locally |
+|---|---|---|
+| `photo_url`, `thumbnail_url` | any account or profile response | They are API-relative paths. Requests made through the axios instance resolve them against `baseURL` automatically; a DOM `src` does not, and resolves against the document origin instead. Every such value passes through `resolveMediaUrl` before reaching an `<img>` — the server is not asked to embed the API mount prefix, because that would put an HTTP concern in the service layer (constitution Principle III). |
+
+---
+
+## 7. Form validation timing and navigation chrome
+
+Three conventions that cut across every slice. Fixed here because a form or page that deviates is
+not locally wrong — it is inconsistent with the rest of the application, which is harder to spot.
+
+### 7.1 Validation timing
+
+Every form uses `validationLogic: revalidateLogic({ mode: 'submit', modeAfterSubmission: 'change' })`
+with its Zod schema registered under `validators: { onDynamic }`.
+
+| Moment | Behaviour |
+|---|---|
+| While typing, before any submit | Nothing validates and no message appears (FR-057) |
+| On submit | Every field validates; each failure renders beside its own field (FR-058) |
+| After the first submit | Fields revalidate on change, so corrections clear their messages live |
+
+The submit button's `disabled` expression is `isSubmitting` **only**. It must not include
+`canSubmit`: a button disabled by errors the person cannot yet see is FR-057's failure mode.
+
+### 7.2 Server errors on a form
+
+A 422 carrying `fields` is mapped onto the form with
+`form.setErrorMap({ onServer: toServerErrorMap(error) })` in the mutation's `onError`. TanStack Form
+distributes the `fields` entries onto the matching fields' `onServer` error slot, so they render
+through the same `fieldErrorText` path as schema errors and no form needs its own mapping.
+
+A 422 with no `fields`, and every other failure status, renders as the form-level message. A 409
+(duplicate email, stale version) is form-level by nature — it describes the request, not a field.
+
+### 7.3 Navigation chrome
+
+| Element | Location | Rule |
+|---|---|---|
+| App shell | `widgets/app-shell`, mounted in `routes/_authed.tsx` | Identity, breadcrumb trail, profile link, sign-out, and the back-control region. Mounted at `_authed` and **not** at `__root`, because `__root` also carries `/login` and `/set-password`, which must show no signed-in chrome (FR-062) |
+| Breadcrumbs | `widgets/app-shell/model/use-breadcrumbs.ts` | Derived from the router's matched routes as typed link descriptors. No URL is built from a string (Principle IV). The `/admin/users` crumb carries the active search params, so the trail returns to the filtered view |
+| Back control | `shared/ui/back-button.tsx` | `history.back()` when `useCanGoBack()` is true, otherwise a typed `fallbackTo` route, which is required rather than optional so a deep-linked page always offers a way out. History-based back is what satisfies FR-061's "restore the filtered view" without threading search params through links |
+| Search-term navigation | `widgets/user-directory-table` | Debounced 500 ms and navigated with `replace: true`, so typing leaves one history entry. Paging and filter changes push a normal entry — they are steps worth reversing (FR-063, SC-013) |

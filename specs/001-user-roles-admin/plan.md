@@ -83,7 +83,9 @@ No raw SQL except the two documented exceptions below. Sessions must be revocabl
 
 *GATE: Must pass before Phase 0 research. Re-checked after Phase 1 design.*
 
-Evaluated against `.specify/memory/constitution.md` v1.0.0.
+Evaluated against `.specify/memory/constitution.md` v1.0.0. **Re-evaluated against v1.1.0 on
+2026-08-25** during the bug-fix slice; the added Principle VI row below is the result, and it is the
+one row that did not pass.
 
 | Principle | Requirement | Pre-Phase-0 | Post-Phase-1 | How the design satisfies it |
 |---|---|:---:|:---:|---|
@@ -92,6 +94,7 @@ Evaluated against `.specify/memory/constitution.md` v1.0.0.
 | III. Layered Backend Architecture | Router → service → repository; `Depends`; no global state | PASS | PASS | Directory tree below assigns one layer per package. Role gate is a dependency; state-dependent rules are in services; all queries in repositories (R-14). Settings and sessions are injected, never module-level. |
 | IV. Feature-Sliced Frontend | FSD layers, one-way imports, `shared/ui`, `shared/api`, Query for server state, Zustand for UI only | PASS | PASS | Layer mapping in R-17; state ownership fixed in `contracts/frontend-contracts.md` §4. The Zustand store holds three UI fields and `pendingAction` deliberately stores a `userId`, not an account object. |
 | V. Async-First & Contained Failures | Async I/O, `AsyncSession`, no raw SQL, service-layer error translation | PASS | **PASS with 2 documented exceptions** | Every I/O path is `async`. Domain errors raised in services map to `HTTPException` in routers through one handler; the single `Error` envelope in the contract carries no internal detail (FR-056). The two raw-SQL exceptions are recorded in Complexity Tracking. |
+| VI. Null-Not-Empty Data Contract | One shared empty-string→null normalizer in `shared/lib`; nullable Pydantic fields are `str \| None` with `min_length=1`; an explicit null clears the column | n/a (added in v1.1.0) | **FAIL as built — remediated by the Fix phase** | As built the frontend had **no** normalizer, so `''` crossed the boundary for every optional profile field; 11 nullable fields in `OwnProfileUpdate` carried no `min_length=1`, so `''` reached the database; and `first_name`/`last_name` accepted an explicit `null` against `NOT NULL` columns, surfacing as a 500. tasks.md T157 and T163–T170 close all three, and T196 adds the grep gate that keeps them closed. This also discharges the constitution's standing `TODO(NULL_NORMALIZATION_HELPER)`. |
 | Stack constraints | Fixed stack; config via `pydantic-settings`; design tokens; versioned migrations | PASS | PASS | No dependency outside the locked list except the four the locked choices require (`aiosqlite`, `pwdlib`, Pillow, `aiosmtplib`) and Alembic, which the constitution's own migration rule mandates. Tokens from `DESIGN_TOKENS.md` become CSS custom properties (R-18). Four Alembic revisions (data-model §13). Chart.js is in the locked stack but unused here, which the stack rule permits — it forbids additions, not non-use. |
 | Workflow & quality gates | Type checking, lint, tests, no `any`, FSD import direction | PASS | PASS | Gate commands are listed in `quickstart.md` §6 so `tasks.md` can attach them per slice. |
 
@@ -258,3 +261,104 @@ should see rather than discover): erasure leaves `trainer_organizations.business
 attribution to survive. For a sole trader whose business name is their own name, this retains personal
 data. The reasoning and the one-line fallback are in [data-model.md](./data-model.md) §10, and the
 spec already flags the related email-retention question for legal review.
+
+## Post-Implementation Technical Decisions (Bug-Fix Slice)
+
+Six defects were reported after Phases 1–8 landed (tasks.md §Fixes, F1–F6). The decisions below
+resolve them. None changes an architectural principle; each fills a gap the original plan left
+implicit, which is why the defect was possible.
+
+### D-01 — Optional values: one normalizer, and `min_length=1` everywhere (F1)
+
+Exactly one helper, `frontend/src/shared/lib/normalize-payload.ts`, converts empty and
+whitespace-only strings to `null`, recursing through nested objects and arrays and passing every
+other value through untouched. Every TanStack Form submit handler routes its payload through it
+before `axios` sees it. Trimming of real values stays in the field's Zod schema, never in the
+normalizer. Per-form ternaries and a second helper are forbidden — Principle VI says one.
+
+On the server, every nullable string field carries `min_length=1` so `''` is a 422 rather than a
+stored value, and the two required name fields reject an explicit `null` with a field-attributed 422
+instead of reaching a `NOT NULL` column and surfacing as a 500. Services keep reading
+`model_dump(exclude_unset=True)`, so an omitted key leaves its column untouched while an explicit
+`null` clears it — the distinction Principle VI exists to preserve, and the one the frontend could
+not previously express because it sent `''` for both.
+
+**Rejected**: normalizing inside the axios request interceptor. It would catch every payload
+automatically, which is its appeal, but it would also silently rewrite bodies for callers that want
+`''` preserved, and it hides a data-contract rule inside transport plumbing where no reviewer looks.
+
+### D-02 — Validation timing: submit first, then live (F5, FR-057)
+
+`@tanstack/react-form` 1.33.5 ships `revalidateLogic`, so this needs no hand-rolled flag: every form
+uses `validationLogic: revalidateLogic({ mode: 'submit', modeAfterSubmission: 'change' })` with its
+Zod schema moved from `validators: { onChange }` to `validators: { onDynamic }`. Before the first
+submit nothing validates; after it, fields revalidate live as they are corrected. The submit button
+drops `canSubmit` from its `disabled` expression and keeps only `isSubmitting`, because a button
+disabled by invisible errors is how FR-057's second sentence gets violated.
+
+Field errors render through one shared `fieldErrorText` helper that normalizes both Standard-Schema
+issue objects and plain strings — the previous inline
+`errors.map((e) => e?.message).join(', ')` silently rendered nothing for a string error, which is
+half of why server-side messages never appeared. Server 422 field errors are injected with
+`form.setErrorMap({ onServer: toServerErrorMap(error) })`, the library's supported channel, so
+FR-058 holds for both sources of rejection with one mapping rather than one per form.
+
+### D-03 — Media URLs are assembled by the client (F2, FR-060)
+
+`photo_url` and `thumbnail_url` stay **API-relative** (`/media/photos/{key}`). The service layer must
+not learn the API's HTTP mount prefix — that is a router concern, and Principle III keeps it out of
+services. The client therefore assembles the absolute URL in one place,
+`frontend/src/shared/api/media.ts`, which prefixes the axios `baseURL`. Requests made *through*
+axios already resolved correctly; only DOM `src` attributes did not, because the browser resolves
+them against the document origin instead. That single omission is the whole defect.
+
+**Rejected**: returning `/api/v1/media/photos/...` from the service. It fixes the symptom by putting
+the mount prefix in three service methods, so any change to the prefix becomes a data-shaped change.
+
+### D-04 — Directory search: 500 ms, URL-owned, replace-navigated (F4, FR-063, SC-013)
+
+The typed term is held in local component state seeded from the `q` search param and pushed into the
+URL after **500 ms** of inactivity (interval chosen by the user on 2026-08-25). The URL remains the
+single source of truth for `q`, per `contracts/frontend-contracts.md` §4 — no Zustand field, no
+second copy of the term. Search-term navigation uses `replace: true` so a 20-character query leaves
+one history entry rather than twenty; paging and the role and status filters keep pushing a normal
+entry, because those are deliberate steps a Super Admin should be able to reverse.
+
+At 500 ms the directory issues one query per settled term instead of one per character, which is what
+SC-013 measures. The interval is a tuning value, not a structural decision.
+
+### D-05 — Navigation: a shared back control inside a persistent shell (F3, FR-061, FR-062, SC-014)
+
+Two parts, both required — the user chose the shell in addition to the button on 2026-08-25.
+
+A shared `BackButton` in `shared/ui` calls the router's `history.back()` when `useCanGoBack()` is
+true and navigates to a required typed `fallbackTo` route otherwise, so a deep-linked page still
+offers a way out. History-based back is what makes FR-061's "restore the filtered view" free: the
+previous entry already carries the directory's search params, so nothing has to be threaded through
+links. The hardcoded `<Link to="/admin/users">` it replaces discarded them.
+
+A persistent shell, `widgets/app-shell`, renders the identity block, a breadcrumb trail derived from
+the router's matched routes with typed link descriptors, the profile link, the sign-out action, and
+the region the `BackButton` renders into. It mounts at **`routes/_authed.tsx`, not
+`routes/__root.tsx`**: the root route also carries `/login` and `/set-password`, and signed-in chrome
+on a sign-in page is what FR-062's last sentence forbids. The dashboard's hand-rolled header is
+removed in the same change, or the landing page carries two.
+
+### D-06 — Email: finish the SMTP port, add nothing (F6, FR-064)
+
+R-11's design stands unchanged — one `EmailSender` port, an SMTP implementation, a filesystem sink
+for development and tests, sent in-request with the failure surfaced to the Super Admin. **SMTP only:
+no HTTP-API provider, no persisted outbox, no retry worker** (user decision, 2026-08-25). R-11
+already argues why an outbox is premature for a single invitation, and a second transport would be a
+second thing to configure and test for no behaviour gained.
+
+What was missing is completed: `Settings` gains a `model_validator` making `SMTP_HOST` and
+`SMTP_FROM_ADDRESS` mandatory when `EMAIL_BACKEND=smtp`, so a misconfigured relay is a startup
+failure rather than every invitation silently reporting `invitation_sent: false`; `SMTP_TLS`
+(`starttls` | `implicit` | `none`) and `SMTP_TIMEOUT_SECONDS` become configurable, because the
+hard-coded STARTTLS could reach neither an implicit-TLS relay on 465 nor a local Mailpit on 1025, and
+an unreachable relay could hang an in-request send indefinitely; and the hard-coded
+`noreply@example.org` envelope fallback is removed, since a default that is wrong in production is
+exactly what this plan's configuration rule forbids. On the client, the re-invite action stops
+reporting success unconditionally and honours `invitation_sent`, which is what FR-064 requires and
+what makes FR-028's recovery loop actually reachable.

@@ -378,6 +378,9 @@ parity).
 | Directory `page_size` | 1–100, default 25 | FR-052 |
 | Status transition | Must appear in §1's transition table | FR-003 |
 | Profile write | Must not target `email`, `role`, `status`, `created_at`, or `skill_level` | FR-033 |
+| Any nullable text field | The empty string is rejected (`min_length=1`); absence is spelled `null` at every layer; no nullable text column may hold `''`. An explicit `null` in a partial update clears the column; an omitted key leaves it unchanged | Constitution VI, FR-059 |
+| `first_name`, `last_name` in a partial update | May be omitted, but an explicit `null` is rejected with a field-attributed 422 — both map to `NOT NULL` columns (§3) | FR-005, FR-036, Constitution VI |
+| `phone` on account creation | Same rule as on profile save: parseable to E.164 and stored normalized. Enforced on **both** write paths, not only the profile one | FR-022, FR-036 |
 
 ---
 

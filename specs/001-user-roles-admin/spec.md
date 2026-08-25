@@ -423,6 +423,38 @@ compliance record captures the original identity, the acting administrator, the 
 - **FR-056**: System MUST NOT expose internal error detail, stored credential material, or system
   diagnostics to any client under any failure condition.
 
+**Input validation and optional detail**
+
+- **FR-057**: System MUST NOT announce a field as invalid while the person is still filling in a
+  form. Validation results MUST be presented when they submit it, after which the platform MAY keep
+  those results up to date as the offending fields are corrected. Submitting MUST NOT be blocked in
+  a way that prevents the person from discovering what is wrong.
+- **FR-058**: System MUST show each rejected field's own message beside that field, whether the
+  rejection was determined before the submission reached the platform or by the platform itself. A
+  message naming no field MUST NOT be the only feedback given for a field-level rejection.
+- **FR-059**: System MUST treat "never provided" and "cleared" as the same absent state for every
+  optional detail it stores, MUST actually remove the stored value when a person clears an optional
+  detail, and MUST NOT report a save as successful while retaining the previous value.
+
+**Presentation and navigation**
+
+- **FR-060**: System MUST display a person's stored photo wherever their photo appears, including
+  their own profile, as soon as an upload succeeds.
+- **FR-061**: Every view reached from another MUST offer a way back to where the person came from,
+  and returning to a list MUST restore the page, search term, and filters they left it on.
+- **FR-062**: Every view available to a signed-in person MUST present the same navigation frame,
+  showing who is signed in, where in the platform they currently are, and a way to reach their own
+  profile and to sign out. Views available before sign-in MUST NOT present it.
+- **FR-063**: System MUST NOT query the user directory on each keystroke of a search term. It MUST
+  wait until typing settles before searching, and MUST NOT record one reversible navigation step per
+  character typed.
+
+**Invitation delivery**
+
+- **FR-064**: System MUST tell the acting Super Admin when an invitation could not be delivered, on
+  both first creation and re-invitation, and MUST name re-invitation as the way to try again. A
+  failed delivery MUST NOT be reported as a success.
+
 ### Key Entities *(include if feature involves data)*
 
 - **User Account**: One person's identity and means of entry. Holds unique email, hashed password,
@@ -482,6 +514,11 @@ compliance record captures the original identity, the acting administrator, the 
   than 10 consecutive failures, and legitimate access resumes automatically within 15 minutes.
 - **SC-012**: No client-visible response, in any tested failure condition, contains internal error
   detail, stack traces, or stored credential material.
+- **SC-013**: Typing a 20-character search term into the user directory produces exactly one
+  directory query and exactly one reversible navigation step, and the results reflect the whole term.
+- **SC-014**: The navigation frame is present on 100% of views reachable while signed in and on 0% of
+  views reachable before signing in, and returning to a filtered directory from any account opened
+  from it restores that filtered view unchanged.
 
 ## Out of Scope
 

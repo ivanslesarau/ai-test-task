@@ -12,4 +12,4 @@ Act as an architect and lead developer. Your primary responsibility is to strict
 - `/speckit.tasks` — Review `plan.md` and break it down into a strict, ordered checklist of tasks (`tasks.md`). Tasks must account for dependencies.
 - `/speckit.implement` — Start coding. Follow the steps in `tasks.md` strictly and check off tasks as they are completed.
 
-Always consult `constitution.md` (if it exists) to ensure compliance with the project's architectural rules and constraints.
+CRITICAL: Before writing ANY code or proposing architecture changes, you MUST read `constitution.md` using your file tools. Never skip this step, even for small changes. Your output must strictly follow the rules defined there

@@ -466,3 +466,269 @@ merge cost exceeds the parallel gain.
 - Commit after each task or logical group; the constitution requires ticking tasks off here as they land
 - Every checkpoint is a valid stopping point for validation or demo
 - Two raw-SQL sites are permitted and only two: T016's pragmas and T027's triggers. Any third is a constitution violation — T153's grep is what catches it
+
+---
+
+## Fixes
+
+**Added**: 2026-08-25 | **Source**: post-implementation bug report against WIP commit `df1bdf3`
+
+Six defects were reported after Phases 1–8 landed. Each is traced to a verified root cause below and
+addressed here. Numbering continues from T156; **no existing task is renumbered or altered.**
+
+### Format for this phase: `[ID] [P?] [Fix] Description`
+
+- **[P]**: Can run in parallel — different files, no dependency on incomplete work
+- **[Fix]**: Which reported defect the task belongs to (F1–F6):
+
+| Marker | Reported defect | Verified root cause |
+|---|---|---|
+| **F1** | Empty-string values in form inputs; invalid-input messages not shown | No shared empty-string→null normalizer exists in `shared/lib`, so `''` crosses the network for every optional field (Principle VI); 11 nullable fields in `OwnProfileUpdate` carry no `min_length=1`; `''` for `phone` hard-fails in `_normalize_phone`; and no form except set-password maps a 422 `fields[]` onto its fields |
+| **F2** | Photo upload broken; photo not shown on the profile page | `photo_url`/`thumbnail_url` are **API-relative** paths that only resolve against the axios `baseURL`; putting the raw value into a DOM `src` resolves it against the document origin instead, where the dev proxy forwards only `/api` |
+| **F3** | Back buttons missing | No back affordance exists except one hardcoded `<Link>` on the user detail page, which discards the directory's search params; and no persistent chrome exists at all — `routes/_authed.tsx` renders a bare `<Outlet/>`, so each page invents its own header or has none |
+| **F4** | Search field requests on every key press | The directory search input calls `navigate` synchronously in `onChange`, minting a new query key — and a new history entry — per keystroke |
+| **F5** | Forms validate on every change instead of on submit | All four forms register the Zod schema under `validators: { onChange }` and gate the submit button on `canSubmit` |
+| **F6** | Email sending service unfinished | `EMAIL_BACKEND=smtp` starts with no `SMTP_HOST`; TLS mode and timeout are hard-coded; the envelope `From` has a hard-coded production fallback; and the re-invite path reports success regardless of `invitation_sent` |
+
+**Constitution note**: F1 discharges the standing `TODO(NULL_NORMALIZATION_HELPER)` recorded in
+`.specify/memory/constitution.md` v1.1.0 — Principle VI requires exactly one normalizer in
+`shared/lib`, and the frontend has none. T157 creates it and T171–T174 migrate every TanStack Form
+submit path onto it, which is also the merge gate in Development Workflow §2.
+
+---
+
+### Fix Phase A: Shared primitives (blocking prerequisites)
+
+**Purpose**: Every later fix task consumes one of these. All five are new files with no dependency
+on each other, so the whole group runs in parallel.
+
+**⚠️ CRITICAL**: No task in Fix Phases B–G may begin until this phase is complete.
+
+- [ ] T157 [P] [F1] Create the single empty-string-to-null normalizer in `frontend/src/shared/lib/normalize-payload.ts` — converts any string that is empty or whitespace-only to `null`, recursing through nested objects and arrays, passing every other value through unchanged; no trimming of real values. This is the **only** normalizer permitted to exist (constitution Principle VI); per-form ternaries at the call site are forbidden
+- [ ] T158 [P] [F1] Create the shared form-error helpers in `frontend/src/shared/lib/form-errors.ts` — `fieldErrorText(errors: readonly unknown[]): string | null`, normalizing both Standard-Schema issue objects (`{ message }`) and plain string errors, and `toServerErrorMap(error: unknown): { form?: string; fields: Record<string, string> }`, built from `ApiError.fields` for feeding `form.setErrorMap({ onServer: ... })`. Narrow through `isApiError`, never `any`
+- [ ] T159 [P] [F2] Create the media URL resolver in `frontend/src/shared/api/media.ts` — `resolveMediaUrl(path: string | null): string | null` prefixing `apiClient.defaults.baseURL` so an API-relative `/media/photos/{key}` becomes a URL a DOM `src` can load. This is the only place a media path becomes DOM-usable; components must never concatenate the base URL themselves
+- [ ] T160 [P] [F4] Create the debounce hook in `frontend/src/shared/lib/use-debounced-callback.ts` — a typed `useDebouncedCallback<TArgs>(fn, delayMs)` that clears its pending timer on unmount and on delay change. No `any`, no `NodeJS.Timeout` leakage into the public signature
+- [ ] T161 [P] [F3] Create `frontend/src/shared/ui/back-button.tsx` — a `BackButton` taking a required typed `fallbackTo` route, calling `useRouter().history.back()` when `useCanGoBack()` is true and navigating to `fallbackTo` otherwise, so a deep-linked page still offers a way out. Uses `shared/ui/button` and `lucide-react`'s chevron; no route string is built by concatenation
+- [ ] T162 [P] [F1] [F2] [F4] Unit-test the four new shared primitives in `frontend/tests/shared/normalize-payload.test.ts`, `frontend/tests/shared/form-errors.test.ts`, `frontend/tests/shared/media.test.ts`, and `frontend/tests/shared/use-debounced-callback.test.ts` — including whitespace-only strings, nested arrays and objects, a string-valued field error, a `null` media path, and that a rapid burst of calls invokes the debounced function exactly once
+
+**Checkpoint**: All five primitives exist and are unit-tested; nothing consumes them yet.
+
+---
+
+### Fix Phase B: Backend validation contract (F1)
+
+**Purpose**: Close the Principle VI gaps and the FR-022 phone-format gap before the frontend starts
+sending `null` instead of `''`, so the two sides never disagree mid-fix.
+
+**Depends on**: nothing in Fix Phase A — this phase may run concurrently with it.
+
+- [ ] T163 [F1] Extract phone parsing and E.164 normalization out of `backend/src/app/services/profile_service.py` into a new `backend/src/app/core/phone.py`, raising the same field-attributed `ValidationFailure`, and **delete the two `print()` calls** at the top of the old `_normalize_phone` — they write the raw phone number to stdout, which is personal data in the logs and contradicts T150's "never the request body"
+- [ ] T164 [F1] Add `min_length=1` to every nullable string field in `OwnProfileUpdate` in `backend/src/app/schemas/profile.py` — `phone`, `address`, `website`, `description`, `bio`, `credentials`, `certifications`, `school`, `jersey_number`, `emergency_contact_name`, `emergency_contact_phone`, `emergency_contact_relation` — so `''` returns a field-attributed 422 instead of being persisted (constitution Principle VI, storage invariant)
+- [ ] T165 [F1] In the same file, make `first_name` and `last_name` reject an **explicit** `null` with a field-attributed 422 while still allowing omission — they map to `NOT NULL` columns, so today `{"first_name": null}` reaches `setattr` and surfaces as a 500 through the catch-all handler
+- [ ] T166 [F1] Repoint `ProfileService.update_own_profile` in `backend/src/app/services/profile_service.py` at `app.core.phone`, and keep the `is not None` guard so an explicit `null` still clears the column while a real value is normalized (Principle VI: explicit null clears, omitted key untouched)
+- [ ] T167 [F1] Enforce phone format on the creation path — add the E.164 validator from `app.core.phone` to `CreateUserRequest.phone` in `backend/src/app/schemas/admin_user.py` and store the normalized value in `UserAdminService.create_user` in `backend/src/app/services/user_admin_service.py`. FR-022 and data-model.md §12 require the same rule the profile path already applies; only the profile path applies it today
+- [ ] T168 [P] [F1] Unit-test `backend/src/app/core/phone.py` in `backend/tests/unit/test_phone.py` — a parseable international number normalizes to E.164, an unparseable string and a valid-looking but invalid number both raise with the error attributed to `phone`, and the empty string is rejected rather than crashing
+- [ ] T169 [P] [F1] Extend `backend/tests/integration/test_own_profile.py` with the null-contract cases the merge gate requires: `''` for each nullable field returns 422 naming that field; an explicit `null` clears the column to SQL `NULL`; an omitted key leaves the column unchanged; and `{"first_name": null}` returns 422, not 500
+- [ ] T170 [P] [F1] Extend `backend/tests/integration/test_create_user.py` with a malformed phone returning 422 attributed to `phone`, and a valid national-format number being stored in E.164
+
+**Checkpoint**: No nullable text column can hold `''`, an explicit `null` clears, and both write paths validate the phone identically.
+
+---
+
+### Fix Phase C: Form validation timing and error display (F1, F5)
+
+**Purpose**: Validate on submit, then live-revalidate; show each offending field's message beside
+that field, from both Zod and the server.
+
+**Depends on**: Fix Phase A (T157, T158) and Fix Phase B (the 422 shapes these forms render).
+
+Each form is a separate file, so the four migrations run in parallel. Every one of them applies the
+same three changes: swap `validators: { onChange: schema }` for
+`validationLogic: revalidateLogic({ mode: 'submit', modeAfterSubmission: 'change' })` plus
+`validators: { onDynamic: schema }` (supported by the installed `@tanstack/react-form` 1.33.5);
+render field errors through `fieldErrorText` instead of the inline
+`errors.map((e) => e?.message).join(', ')`, which silently renders nothing for a string-valued
+error; and drop `canSubmit` from the submit button's `disabled` expression, keeping `isSubmitting`,
+so submitting is what reveals the errors.
+
+- [ ] T171 [P] [F5] Migrate `frontend/src/features/auth/sign-in/ui/sign-in-form.tsx` to submit-time validation and `fieldErrorText`
+- [ ] T172 [P] [F5] Migrate `frontend/src/features/auth/set-password/ui/set-password-form.tsx`, and replace its one-off `fieldMessage('password')` call with `form.setErrorMap({ onServer: toServerErrorMap(error) })` so the breached-password and policy failures land on the field generically
+- [ ] T173 [P] [F1] [F5] Migrate `frontend/src/features/admin/create-user/ui/create-user-form.tsx`, add `form.setErrorMap({ onServer: ... })` on mutation error so a 422 names the offending field instead of collapsing to "One or more fields are invalid.", and route the payload through `normalizeEmptyToNull` — the conditional `business_name` spread stays, but no field may leave as `''`
+- [ ] T174 [P] [F1] [F5] Migrate `frontend/src/features/profile/edit-own/ui/edit-profile-form.tsx`, route the submitted values through `normalizeEmptyToNull`, and add `form.setErrorMap({ onServer: ... })`. This is the task that makes a cleared optional field actually clear it, and that lets a user with no phone number save their profile at all
+- [ ] T175 [F1] [F5] Update `frontend/tests/features/sign-in.test.tsx`, `create-user.test.tsx`, and `edit-own-profile.test.tsx` for the new timing — assert no error text appears while typing before the first submit, that submitting an invalid form reveals the per-field message, that a 422 `fields` entry renders next to its own input, and that an untouched optional field is submitted as `null` rather than `''`
+
+**Checkpoint**: No form shows an error before its first submit, every 422 field message is visible beside its input, and no `''` leaves the browser.
+
+---
+
+### Fix Phase D: Profile photo (F2)
+
+**Depends on**: Fix Phase A (T159).
+
+- [ ] T176 [F2] Resolve the photo URL through `resolveMediaUrl` in `frontend/src/pages/profile/index.tsx` before passing it to `PhotoField`, so `<AvatarImage>` receives a URL the browser can load rather than an API-relative path that 404s against the dev server and silently falls back to the initials
+- [ ] T177 [F2] In `frontend/src/features/profile/edit-own/ui/photo-field.tsx`, stop hard-rejecting on `file.type` when it is empty or unrecognized — the browser derives it from the extension, and R-07 makes the decoded bytes the authority; keep the size pre-check and let an unsupported format come back as the server's 415
+- [ ] T178 [F2] Remove the hand-set `'Content-Type': 'multipart/form-data'` header from `useUploadOwnPhoto` in `frontend/src/entities/user/api/use-own-profile.ts` — axios unsets it for browser `FormData` anyway, so it is inert today but is a boundary-less-multipart trap on any other adapter; let the browser set the header with its boundary
+- [ ] T179 [P] [F2] Component-test the photo control in `frontend/tests/features/photo-field.test.tsx` — a resolved URL is used as the image source, an oversized file is rejected without a request, a file with an empty `type` still reaches the server, and a 415 response surfaces as a message naming the accepted formats and size limit
+
+**Checkpoint**: An uploaded photo appears on the profile page immediately after the mutation invalidates `ownProfile`.
+
+---
+
+### Fix Phase E: Directory search debounce (F4)
+
+**Depends on**: Fix Phase A (T160). Must land **before** Fix Phase F, or every keystroke remains a separate back step.
+
+- [ ] T180 [F4] Debounce the search input in `frontend/src/widgets/user-directory-table/ui/user-directory-table.tsx` — hold the typed text in local component state seeded from `search.q`, push it into the URL through `useDebouncedCallback` at **500 ms** (interval decided by the user, 2026-08-25), and keep the URL the single source of truth for `q` (contracts/frontend-contracts.md §4); do not introduce a Zustand field or a second copy of the search term
+- [ ] T181 [F4] In the same file, navigate with `replace: true` for search-term changes so a 20-character query leaves one history entry instead of twenty, while paging and the role/status filters keep pushing a normal entry — those are deliberate steps a Super Admin should be able to reverse
+- [ ] T182 [P] [F4] Component-test the directory search in `frontend/tests/widgets/user-directory-table.test.tsx` with fake timers — typing a multi-character term issues exactly one `GET /admin/users`, the request carries the full term, and the role and status filters still apply immediately
+
+**Checkpoint**: One request per settled search term; history is not flooded by typing.
+
+---
+
+### Fix Phase F: Navigation chrome and back affordance (F3)
+
+**Scope widened 2026-08-25 by user decision**: the shared `BackButton` alone was the original scope;
+the user chose the **app shell as well**, so this phase now delivers persistent chrome for every
+authenticated page in addition to the per-page back affordance.
+
+**Depends on**: Fix Phase A (T161) and Fix Phase E (T181 — until search-term navigation is
+`replace: true`, a back affordance is worse than none, because one back press per keystroke is what
+the user gets).
+
+**⚠️ Task IDs in this phase are not in execution order.** T183–T186 were written before the scope
+widened and are kept at their original numbers rather than renumbered; T199–T204 are the shell.
+Execute in this order:
+
+```
+T161 (BackButton, Fix A) → T199 → T200 → T201 → T202 → T203 → T183 → T184 → T185 → T186, T204
+```
+
+**Where the shell lives**: `routes/_authed.tsx`, not `routes/__root.tsx`. The root route also
+carries `/login` and `/set-password`, which must **not** show signed-in chrome — a sign-in page with
+a sign-out button and a breadcrumb trail is wrong. `__root.tsx` is therefore untouched by this
+phase and stays a bare `<Outlet/>`.
+
+- [ ] T199 [P] [F3] Add the shadcn/ui `breadcrumb` primitive to `frontend/src/shared/ui/breadcrumb.tsx` via the CLI, which `components.json` already aliases into `shared/ui` (T008). All shadcn primitives live in `shared/ui` and nowhere else (constitution Principle IV)
+- [ ] T200 [F3] Build the breadcrumb trail in `frontend/src/widgets/app-shell/model/use-breadcrumbs.ts` — derive the trail from the router's matched routes, emitting typed `to`/`params`/`search` link descriptors, never concatenated URL strings (Principle IV, routing rule). Carry the directory's search params on the `/admin/users` crumb so the trail returns to the filtered view, not a reset one
+- [ ] T201 [F3] Build `frontend/src/widgets/app-shell/ui/app-shell.tsx` — the persistent header: a `BackButton` slot, the breadcrumb region from T200, the signed-in person's name and role read from the `session` query, a typed `/profile` link, and the sign-out action from `features/auth/sign-out`. Composes `shared/ui` primitives only; holds no server state of its own and copies nothing into Zustand
+- [ ] T202 [F3] Render the shell around `<Outlet/>` in `frontend/src/routes/_authed.tsx`, leaving the existing `beforeLoad` session guard untouched — the guard is the reason the shell can assume a session exists and render the identity block without a loading branch
+- [ ] T203 [F3] Remove the now-duplicated header block from `frontend/src/pages/dashboard/index.tsx` — the identity heading, the `/profile` link, and the sign-out button all move into the shell; the page keeps only its per-role content. Two headers stacked on the landing page is the failure mode this prevents
+- [ ] T183 [F3] Add an optional `backTo` slot rendering `BackButton` to `frontend/src/widgets/profile-form-shell/ui/profile-form-shell.tsx`, and use it from `frontend/src/pages/profile/index.tsx` with `fallbackTo` of `/` — the profile page currently has no way back to the landing area
+- [ ] T184 [F3] Add `BackButton` with `fallbackTo` of `/` to the directory header in `frontend/src/pages/admin-users/index.tsx` (`UsersIndexPage`)
+- [ ] T185 [F3] Replace the hardcoded `<Link to="/admin/users">← Back to directory</Link>` in `UserDetailPage` in `frontend/src/pages/admin-users/index.tsx` with `BackButton` and `fallbackTo` of `/admin/users` — the hardcoded link discards the directory's page, search term, and filters, which contradicts contracts/frontend-contracts.md §4's reason for putting that state in the URL at all
+- [ ] T186 [P] [F3] Component-test back navigation in `frontend/tests/shared/back-button.test.tsx` — history back is used when there is history, `fallbackTo` is navigated to when there is not, and returning from a user detail restores the directory's filters
+- [ ] T204 [P] [F3] Component-test the shell in `frontend/tests/widgets/app-shell.test.tsx` — the header renders on every authenticated route and on none of the public ones, the breadcrumb trail matches the active route, the `/admin/users` crumb carries the active filters, and sign-out is reachable from the shell rather than from a page
+
+**Checkpoint**: Every authenticated page carries the same chrome, every page below the landing area offers a way back, and returning to the directory preserves the filtered view.
+
+---
+
+### Fix Phase G: Email sending service (F6)
+
+**Purpose**: Finish the port R-11 specified. The interface, both implementations, and the injection
+wiring already exist; configuration validation, transport options, and failure visibility do not.
+
+**Depends on**: nothing in Fix Phases A–F — this phase may run concurrently.
+
+- [ ] T187 [F6] Add a `model_validator(mode="after")` to `Settings` in `backend/src/app/core/config.py` requiring `smtp_host` and `smtp_from_address` when `email_backend == "smtp"`, so a misconfigured relay fails at startup instead of turning every invitation into a swallowed exception and a silent `invitation_sent: false`
+- [ ] T188 [F6] Add `smtp_tls: Literal["starttls", "implicit", "none"] = "starttls"` and `smtp_timeout_seconds: int = 10` to `Settings` in `backend/src/app/core/config.py` — the current implementation hard-codes STARTTLS, which cannot reach an implicit-TLS relay on 465 or a local Mailpit/MailHog on 1025
+- [ ] T189 [F6] Map the three TLS modes and the timeout onto the `aiosmtplib.send` call in `backend/src/app/services/ports/email_sender.py`, and **remove the `or "noreply@example.org"` fallback** for the envelope `From` — a hard-coded production default is exactly what the settings class's own docstring forbids. Keep the bool return and the caught-and-logged failure: R-11's in-request send with a Super-Admin-visible failure stands
+- [ ] T190 [F6] Update `backend/.env.example` with `SMTP_TLS` and `SMTP_TIMEOUT_SECONDS`, and state in the comments which keys become mandatory when `EMAIL_BACKEND=smtp`; reflect the same in the environment table in `backend/README.md`
+- [ ] T191 [F6] Surface a failed re-invitation in `frontend/src/features/admin/reinvite-user/ui/reinvite-button.tsx` — it currently toasts "Invitation re-sent" unconditionally, ignoring `invitation_sent` in the response, so a delivery failure reads as success and the Super Admin never re-tries. Report the failure and name re-invite as the retry, matching the wording the create path already uses
+- [ ] T192 [F6] Give `useReinviteUser` in `frontend/src/entities/user/api/use-users.ts` an explicit response type parameter on `apiClient.post` — the untyped call yields `any` for `data`, which Principle II forbids anywhere in the frontend
+- [ ] T193 [P] [F6] Unit-test both senders in `backend/tests/unit/test_email_sender.py` — the filesystem sink writes a file containing the recipient, subject, and setup link and returns `True`; the SMTP sender returns `False` and logs rather than raising when the relay is unreachable; each TLS mode maps to the expected `aiosmtplib` arguments; and no rendered invitation body contains a password
+- [ ] T194 [P] [F6] Unit-test the settings guard in `backend/tests/unit/test_settings_validation.py` — `EMAIL_BACKEND=smtp` without `SMTP_HOST` or without `SMTP_FROM_ADDRESS` fails to construct `Settings`, and `EMAIL_BACKEND=filesystem` constructs without any SMTP key
+- [ ] T195 [P] [F6] Component-test the re-invite button in `frontend/tests/features/reinvite-user.test.tsx` — `invitation_sent: false` renders a failure message, `true` renders success
+
+**Checkpoint**: A misconfigured mail relay is a startup error, a real relay is reachable under all three TLS modes, and non-delivery is visible to the Super Admin on both the create and re-invite paths.
+
+---
+
+### Fix Phase H: Regression gates
+
+**Depends on**: all of Fix Phases A–G.
+
+- [ ] T196 [F1] Add a grep gate to `.github/workflows/ci.yml` alongside T153's two — assert that `normalize-payload` is imported by every file containing `onSubmit:` under `frontend/src/features/`, and that no second normalizer or inline `|| null` / `? x : null` empty-string conversion exists at a submit call site. Principle VI permits exactly one normalizer, and a second one is the failure mode this catches
+- [ ] T197 Run the full quality gate from quickstart.md §6 — ruff, mypy strict, pytest, ESLint including the boundaries rule, `tsc -b --noEmit`, Vitest — and fix every finding introduced by T157–T196
+- [ ] T198 Walk the affected quickstart.md §4 scenarios end to end — US2 creation with a bad phone and a duplicate email, US3 profile save with an empty optional field and a photo upload, the directory search, and back navigation from a user detail — and reconcile any divergence between documented and actual behaviour
+
+---
+
+### Fixes: Dependencies & Execution Order
+
+```
+Fix A (T157–T162) ──┬──▶ Fix C (T171–T175) ─────────────────────────────┐
+                    ├──▶ Fix D (T176–T179) ─────────────────────────────┤
+                    ├──▶ Fix E (T180–T182) ──▶ Fix F (T199–T203,        │
+                    │                                  T183–T186, T204) ├──▶ Fix H (T196–T198)
+Fix B (T163–T170) ──┴──▶ Fix C                                          │
+Fix G (T187–T195) ──────────────────────────────────────────────────────┘
+```
+
+- **Fix A and Fix B are the only entry points** and are independent of each other; Fix G is independent of both and can be picked up by a third developer immediately
+- **Fix C depends on both A and B** — it renders the errors B produces using the helpers A creates
+- **Fix E must precede Fix F**: until T181 makes search-term navigation `replace: true`, a back button is worse than none, because one back press per keystroke is what the user gets
+- **Fix D depends only on T159**
+- **Within Fix F**, the shell (T199–T203) precedes the per-page back affordances (T183–T185), because the shell owns the region the `BackButton` renders into. T186 and T204 are the only `[P]` tasks in the phase
+
+### Fixes: Same-File Serialization
+
+Additions to the list above; these must not be parallelized despite sitting in different phases:
+
+- `frontend/src/pages/admin-users/index.tsx` — T184, T185
+- `frontend/src/pages/profile/index.tsx` — T176, T183
+- `frontend/src/pages/dashboard/index.tsx` — T067, T203
+- `frontend/src/routes/_authed.tsx` — T039, T202
+- `frontend/src/widgets/app-shell/` — T200, T201 (`model/` and `ui/` are separate files, but T201 consumes T200's hook, so they are sequential, not parallel)
+- `frontend/src/widgets/profile-form-shell/ui/profile-form-shell.tsx` — T109, T183
+- `frontend/src/shared/ui/` — T040, T199 (a shadcn CLI `add` run; do not run it concurrently with any other `add`)
+- `frontend/src/routes/__root.tsx` — **no fix task touches this file.** Recorded here so the omission is deliberate and reviewable: the shell belongs at `_authed`, because `__root` also carries `/login` and `/set-password`, which must not render signed-in chrome
+- `frontend/src/widgets/user-directory-table/ui/user-directory-table.tsx` — T088, T125, T152, T180, T181
+- `frontend/src/features/profile/edit-own/ui/photo-field.tsx` — T108, T177
+- `frontend/src/entities/user/api/use-own-profile.ts` — T106, T178
+- `frontend/src/entities/user/api/use-users.ts` — T086, T191, T192
+- `frontend/src/features/profile/edit-own/ui/edit-profile-form.tsx` — T107, T174
+- `frontend/src/features/admin/create-user/ui/create-user-form.tsx` — T087, T173
+- `backend/src/app/schemas/profile.py` — T100, T164, T165
+- `backend/src/app/schemas/admin_user.py` — T079, T119, T136, T167
+- `backend/src/app/services/profile_service.py` — T102, T103, T163, T166
+- `backend/src/app/services/user_admin_service.py` — T080, T081, T120, T121, T167
+- `backend/src/app/core/config.py` — T015, T187, T188
+- `backend/src/app/services/ports/email_sender.py` — T076, T189
+- `backend/tests/integration/test_own_profile.py` — T093, T169
+- `backend/tests/integration/test_create_user.py` — T068, T170
+
+### Fixes: Specification approval state
+
+**APPROVED AND MERGED — 2026-08-25.** Every open design question was decided by the user, and every
+specification amendment this phase depends on has been applied. **Nothing in this phase is blocked;
+implementation may begin.**
+
+| Question | Decision | Tasks affected |
+|---|---|---|
+| Back navigation model | **App shell as well as the button** — persistent header and breadcrumbs, not a bare back button | T161 unblocked; T199–T204 added; T183–T185 kept |
+| Debounce interval | **500 ms** | T180 unblocked and updated |
+| Email transport | **SMTP only** — no HTTP-API sender, no outbox or retry worker | T187–T195 unblocked and confirmed in scope |
+| Spec artifact edits | **Approved and applied** | all — see the requirement backing below |
+
+Requirement backing now in place, so Principle I is satisfied for every task in this phase:
+
+| Artifact | What landed |
+|---|---|
+| `spec.md` | **FR-057**–**FR-064** in three new groups (input validation and optional detail; presentation and navigation; invitation delivery), plus **SC-013** and **SC-014** |
+| `plan.md` | Constitution Check re-evaluated against constitution v1.1.0, adding the Principle VI row as **FAIL as built**; new `## Post-Implementation Technical Decisions (Bug-Fix Slice)` section carrying **D-01**–**D-06** |
+| `data-model.md` | Three rows in §12 — the nullable-text/null-clears rule, the required-name null rejection, and phone format on both write paths |
+| `contracts/openapi.yaml` | `minLength: 1` on twelve nullable `OwnProfileUpdate` strings; null-clears semantics in its description; phone format on `CreateUserRequest`; API-relative declared on all six photo-URL properties |
+| `contracts/frontend-contracts.md` | §3 the two cross-form obligations; §5 `media.ts`; §6 the must-derive table; new §7 on validation timing, server-error mapping, and navigation chrome |
+
+Traceability from each fix group to its requirement:
+
+| Fix | Requirements | Plan decision |
+|---|---|---|
+| F1 | FR-057, FR-058, FR-059; data-model §12 | D-01, D-02 |
+| F2 | FR-060 | D-03 |
+| F3 | FR-061, FR-062, SC-014 | D-05 |
+| F4 | FR-063, SC-013 | D-04 |
+| F5 | FR-057, FR-058 | D-02 |
+| F6 | FR-064 | D-06 |
