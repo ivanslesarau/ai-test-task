@@ -1,4 +1,4 @@
-# Specification Quality Checklist: User Roles, Authorization & Super Admin User Management
+# Specification Quality Checklist: User Roles, Super Admin Management, ShareLink Onboarding & Portal Branding
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-08-19
@@ -80,4 +80,50 @@ back into the requirements they affected. Full reasoning and rejected alternativ
 FR-030's resolution also added acceptance scenario 9 to US2 and revised the Assumptions note on
 roles needed for testing.
 
-**Checklist status: all 16 items pass.**
+**Checklist status (2026-08-25): all 16 items pass.**
+
+**Revalidated 2026-08-26** after the ShareLink and portal-branding extension: **104 functional
+requirements, 25 success criteria, 70 Given/When/Then acceptance scenarios across 8 user stories,
+and 25 edge cases**. User Stories 6 to 8, FR-065 to FR-104, SC-015 to SC-025, four key entities
+(Invitation Link, Trainer–Player Association, Active Trainer Context, Trainer Portal Branding), and
+14 edge cases were added to cover epic stories US-01.02 and US-01.14 plus the multi-trainer
+association the user called out. The Out of Scope section was rewritten accordingly: the three
+bullets that previously excluded ShareLink registration, multi-trainer associations, and portal
+branding were removed, and six bullets were added to fence what remains excluded (child-profile
+family selection, coach invitation links, link analytics, trainer-side association management, and
+Phase 2 branding).
+
+All 16 checklist items were re-scanned against the extended document and still pass:
+
+| Item | Evidence |
+|------|----------|
+| No implementation details | A term scan over the new text found no library, endpoint, storage, or file-layout reference. "Invitation link" and "code" are business concepts; the epic's own name "ShareLink" is kept only in headings and the scope note so the epic can be traced. |
+| Requirements testable | Each of FR-065 to FR-104 names an observable outcome; the ones that are hard to observe directly (FR-066 unguessability, FR-090 cross-trainer disclosure, FR-099 legibility) are pinned to SC-021, SC-025, and SC-023 respectively. |
+| Success criteria measurable and technology-agnostic | SC-015 to SC-025 state times, counts, percentages, and a contrast ratio. None names a technology; the 4.5:1 ratio is an accessibility measure, not an implementation. |
+| Acceptance scenarios defined | 23 new scenarios: 7 for Story 6, 8 for Story 7, 8 for Story 8. |
+| Edge cases identified | 14 new edge cases covering dead links, wrong-role visitors, racing registrations, revocation, code guessing, erased players on rosters, a vanishing active trainer, players with no trainer, cross-trainer disclosure, logo replacement, unreadable colours, active content in vector uploads, and branding reaching people already signed in. |
+| Scope bounded | Out of Scope rewritten as described above; the multi-trainer selection prompt and coach links are explicitly deferred with the reason and the story that owns them. |
+| Dependencies and assumptions identified | Ten new assumptions recorded under "Assumptions added with the 2026-08-26 extension". |
+
+Story-to-requirement mapping for the extension:
+
+| Epic story | User story in this spec | Requirements |
+|------------|-------------------------|--------------|
+| US-01.02 Player registers via ShareLink | US6 — Joins a Trainer Through an Invitation Link | FR-065 – FR-083 |
+| US-01.02 (Multi-Trainer) + separated views | US7 — Trains With Several Trainers | FR-084 – FR-092 |
+| US-01.14 Trainer customizes portal branding | US8 — Puts Their Own Brand on Their Portal | FR-093 – FR-104 |
+
+Two wording decisions were made rather than raised as clarifications, because the epic settles both
+and no reasonable alternative reading survives it:
+
+- The request named US-01.14 "coach portal customization". Epic-01 §US-01.14 assigns the
+  customization to the **Trainer**, whose branding coaches and players then see. The spec follows the
+  epic: FR-093 gives the trainer the settings and denies them to coaches, and FR-101 makes coaches
+  part of the audience.
+- The request said a player can be associated with multiple **coaches**. Epic-01 states a coach works
+  for exactly one trainer and that it is **trainers** a player may hold several of. The spec
+  implements multi-**trainer** association (FR-084) and leaves the one-trainer-per-coach rule out of
+  scope with US-01.08.
+
+**Checklist status (2026-08-26): all 16 items pass.**
+

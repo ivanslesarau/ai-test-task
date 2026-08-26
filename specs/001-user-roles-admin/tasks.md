@@ -732,3 +732,342 @@ Traceability from each fix group to its requirement:
 | F4 | FR-063, SC-013 | D-04 |
 | F5 | FR-057, FR-058 | D-02 |
 | F6 | FR-064 | D-06 |
+
+---
+
+## Extension: ShareLink Onboarding, Multi-Trainer Association & Portal Branding
+
+**Added**: 2026-08-26 | **Source**: spec.md User Stories 6–8, FR-065 – FR-104, SC-015 – SC-025 |
+**Design**: plan.md §Extension, research.md Part C (R-21 – R-33), data-model.md §15–§24,
+contracts/openapi.yaml v1.1.0, contracts/frontend-contracts.md §8–§14, quickstart.md US6–US8
+
+Numbering continues from T204; **no existing task is renumbered or altered.** Every task below is
+new work — nothing in this extension exists in the codebase today (verified against
+`backend/src/app/` and `frontend/src/` on 2026-08-26).
+
+### Format for this phase: `[ID] [P?] [Story] Description`
+
+- **[P]**: Can run in parallel — different files, no dependency on incomplete work
+- **[Story]**: US6, US7, or US8, matching spec.md. Extension-Foundational and Extension-Polish tasks
+  carry no story label, because every story depends on them
+
+| Story | Spec | Priority | Delivers |
+|---|---|---|---|
+| **US6** | User Story 6, FR-065 – FR-083 | P1 | A trainer's standing invitation link, and self-service registration into their roster |
+| **US7** | User Story 7, FR-084 – FR-092 | P2 | One account across many trainers, with server-resolved context and provable isolation |
+| **US8** | User Story 8, FR-093 – FR-104 | P3 | A trainer's logo and colour on the portal their players and coaches see |
+
+**Tests are included**, on the same reasoning as the original phases: the constitution makes passing
+tests a merge gate, and SC-017, SC-021, SC-023, and SC-025 each name a test as the thing that
+proves them.
+
+---
+
+### Extension Phase A: Foundational (Blocking Prerequisites)
+
+**Purpose**: The whole schema for the extension, its repositories, and the two pure primitives the
+later phases consume.
+
+**⚠️ CRITICAL**: No task in Extension Phases B–D may begin until this phase is complete.
+
+- [ ] T205 Add the `ShareLinkKind`, `AssociationStatus`, and `Gender` `StrEnum`s to `backend/src/app/models/enums.py`, persisted as constrained text like `UserRole` and `AccountStatus` (data-model §15). `coach_single_use` is declared but never written by this feature — FR-072 requires the distinction to exist now so US-01.08 is additive
+- [ ] T206 [P] Create the `share_links` model in `backend/src/app/models/share_link.py` per data-model §16 — unique index on `code`, composite index on `(trainer_user_id, is_active)`, and a comment recording that `code` is stored **in clear** unlike every other token here (research R-21)
+- [ ] T207 [P] Create the `trainer_player_associations` and `link_lookup_attempts` models in `backend/src/app/models/association.py` per data-model §17 and §18 — the unique constraint on `(trainer_user_id, player_user_id)` is what makes FR-082 true rather than checked, and `link_lookup_attempts` deliberately holds no foreign key
+- [ ] T208 Extend the `player_details` model in `backend/src/app/models/role_details.py` with `player_name`, `date_of_birth`, `gender`, `is_self`, and `active_trainer_user_id` (data-model §19.1)
+- [ ] T209 Extend the `trainer_organizations` model in `backend/src/app/models/role_details.py` with `logo_key`, `primary_color`, and `branding_updated_at` (data-model §19.2) — same file as T208, so these run in sequence
+- [ ] T210 Write Alembic revision `backend/migrations/versions/0005_create_share_links_and_associations.py` creating all three new tables with their check constraints and indexes (data-model §23)
+- [ ] T211 Write Alembic revision `backend/migrations/versions/0006_extend_player_details_and_branding.py` adding the eight columns, all nullable or server-defaulted so no table rewrite is needed; `is_self` takes a server default of `true` so existing player rows stay valid
+- [ ] T212 Write Alembic revision `backend/migrations/versions/0007_backfill_trainer_share_links.py` creating one `player_standing` link for every existing trainer that has none — **SQLAlchemy Core constructs against `op.get_bind()`, not raw SQL**, so the two documented exceptions in plan.md §Complexity Tracking stay at two. Codes are generated in Python during the migration so backfilled links carry the same entropy as new ones. Must be idempotent
+- [ ] T213 [P] Create `backend/src/app/repositories/share_link_repository.py` — lookup by code, current link for a trainer, insert, revoke, and an atomic use-count increment. Queries only; the usability predicate belongs to the service
+- [ ] T214 [P] Create `backend/src/app/repositories/association_repository.py` — insert, exists-by-pair, list by player, list by trainer with paging and a name filter, and count by trainer
+- [ ] T215 [P] Create `backend/src/app/repositories/link_lookup_attempt_repository.py` — insert an attempt, count unsuccessful attempts for a client address in a trailing window, mirroring `sign_in_attempt_repository`
+- [ ] T216 [P] Create `backend/src/app/services/svg_screening.py` — refuse any payload containing a `<!DOCTYPE` declaration **before parsing**, then parse with `xml.etree.ElementTree` and reject a `script` or `foreignObject` element, any attribute beginning `on`, and any `href`/`xlink:href` whose value does not begin `#`. Standard library only; adding a sanitizer dependency would require a constitution amendment (research R-27)
+- [ ] T217 [P] Write `backend/tests/unit/test_svg_screening.py` with a fixture set of hostile SVGs — inline `<script>`, `onload` attribute, `<foreignObject>` with an iframe, an external `xlink:href`, a DOCTYPE with an entity — plus clean SVGs that must pass unchanged
+- [ ] T218 [P] Create `frontend/src/shared/lib/brand-palette.ts` — a pure `brandPalette(primaryHex: string)` returning CSS custom property values: the chosen colour unchanged for borders, gradient stops, and focus rings, and lightness-adjusted variants for any surface carrying text, walking until the token foreground clears a 4.5:1 WCAG contrast ratio (research R-29). No `any`
+- [ ] T219 [P] Write `frontend/tests/shared/brand-palette.test.ts` sweeping several hundred colours — including the mid-tone band where neither black nor white text reaches 4.5:1 against the raw colour — and asserting every returned text-bearing surface clears 4.5:1. **This test is SC-023**
+- [ ] T220 [P] Add `PUBLIC_APP_BASE_URL` to the settings class in `backend/src/app/core/config.py` and to `backend/.env.example` — the absolute join URL is assembled from it, and a hard-coded fallback is exactly what the configuration rule forbids
+- [ ] T221 [P] Add the extension's domain errors to `backend/src/app/core/errors.py` and their HTTP translations — `invitation_link_invalid` (404), `role_cannot_join` (403), `link_lookup_throttled` (429), `trainer_context_not_found` (404). The link error carries **one** message for all five refusal causes (FR-070)
+- [ ] T222 [P] Add the extension's contract types to `frontend/src/shared/api/types.ts`, mirroring the new `openapi.yaml` schemas exactly — `ShareLink`, `JoinLinkPreview`, `JoinRegistrationRequest`, `JoinResult`, `TrainerContextList`, `PortalBranding`, `TrainerPlayerPage`, and the `Gender` and `viewer.state` unions as closed string unions rather than `string`
+- [ ] T223 [P] Create the query-key factories in `frontend/src/entities/join/api/query-keys.ts` and `frontend/src/entities/trainer-context/api/query-keys.ts`, and extend `frontend/src/entities/user/api/query-keys.ts` with `trainers`, `shareLink`, and `branding` (frontend-contracts §9). The `['ctx', trainerId, …]` namespace is the standing convention Epics 02–08 inherit — every context-scoped key goes under it
+- [ ] T224 [P] Write `backend/tests/integration/test_migration_backfill.py` asserting that `alembic upgrade head` run twice leaves exactly one active standing link per trainer, and that every backfilled code is unique and at least 22 characters
+
+**Checkpoint**: `alembic upgrade head` creates 12 tables and backfills a link for every existing
+trainer; the two pure primitives are unit-tested; nothing consumes them yet.
+
+---
+
+### Extension Phase B: User Story 6 — Joining a Trainer Through an Invitation Link (Priority: P1) 🎯 Extension MVP
+
+**Goal**: A trainer holds one durable link. Anyone who opens it sees a join page naming that trainer
+and registers into their roster in a single transaction, arriving signed in and in that trainer's
+area.
+
+**Independent Test**: Create a trainer, take their link, open it in a browser with no session,
+register, and confirm the new person is signed in and sees that trainer while the trainer sees them
+on the roster. Delivers self-service player onboarding with nothing else from the extension shipped.
+
+#### Tests for User Story 6
+
+- [ ] T225 [P] [US6] Write `backend/tests/unit/test_share_link_service.py` covering the five-part usability predicate — inactive, revoked, expired, exhausted, and owner-not-Active each refuse, and a healthy link admits
+- [ ] T226 [P] [US6] Write `backend/tests/integration/test_join_preview.py` asserting a valid code returns only business name, branding, and `viewer.state`, and that an unknown code and a revoked code produce **byte-identical** 404 bodies (FR-070)
+- [ ] T227 [P] [US6] Write `backend/tests/integration/test_join_register.py` covering the happy path — account, profile, player detail, parent contact, association, and session all created, `use_count` raised by exactly one, cookie set — plus an induced mid-transaction failure asserting **nothing** persists (FR-083)
+- [ ] T228 [P] [US6] Write `backend/tests/integration/test_join_validation.py` covering `is_self` age bands (self under 18 refused, dependant over 18 refused), the missing `player_name` when `is_self` is false, the duplicate-email 409, and an empty string for any optional field returning 422 rather than being stored (Principle VI)
+- [ ] T229 [P] [US6] Write `backend/tests/integration/test_join_link_throttle.py` asserting the 11th unsuccessful lookup from one origin returns 429 with `Retry-After`, that the window slides so access resumes without intervention, and running the 10,000-invalid-code trial that **is SC-021**
+- [ ] T230 [P] [US6] Write `backend/tests/integration/test_trainer_roster.py` asserting a trainer sees only their own players, that paging and the name filter work, and that no field of any response names another trainer
+- [ ] T231 [P] [US6] Write `frontend/tests/pages/join.test.tsx` with MSW, asserting all four `viewer.state` branches render their own affordance and that the registration form appears only for `anonymous`
+
+#### Implementation for User Story 6
+
+- [ ] T232 [P] [US6] Create `backend/src/app/schemas/share_link.py` with the `ShareLink` response model matching `openapi.yaml`, assembling the absolute `url` from `PUBLIC_APP_BASE_URL`
+- [ ] T233 [P] [US6] Create `backend/src/app/schemas/join.py` with `JoinLinkPreview`, `JoinRegistrationRequest`, and `JoinResult` — every nullable string carries `min_length=1`, and the age-band rule is a `model_validator` across `is_self` and `date_of_birth` so its message attaches to `date_of_birth`
+- [ ] T234 [US6] Create `backend/src/app/services/share_link_service.py` — issue a standing link, read the trainer's current one, regenerate (revoke plus insert in one transaction), and the single usability predicate T225 tests. No router and no repository decides usability
+- [ ] T235 [US6] Extend `backend/src/app/services/user_admin_service.py` so creating a Trainer issues that trainer's standing link **in the same transaction** as the account (research R-22) — a lazy first-read creation would turn a `GET` into a write and take the SQLite write lock
+- [ ] T236 [US6] Add the per-origin lookup throttle to `backend/src/app/services/share_link_service.py` over `link_lookup_attempt_repository` — 10 unsuccessful lookups per 15 minutes, sliding, recording successes too so the window clears
+- [ ] T237 [US6] Create `backend/src/app/services/join_service.py` with the registration transaction of research R-23 — account, profile, player detail, parent contact, association, use-count increment, and session inside one `async with session.begin()`. The duplicate email is caught as an `IntegrityError` on the existing unique index and translated, never pre-checked
+- [ ] T238 [US6] Add the join confirmation email template to `backend/src/app/services/templates/` and send it from `join_service` through the existing `EmailSender` port, naming the trainer. A delivery failure must not undo the registration, must be recorded, and must not be reported as success (FR-079)
+- [ ] T239 [US6] Create `backend/src/app/api/v1/join_router.py` with `GET /join/{code}` and `POST /join/{code}/register`, both **unauthenticated** (`security: []` in the contract), resolving `viewer.state` server-side — the client must not infer it (frontend-contracts §14)
+- [ ] T240 [US6] Add `GET /me/share-link` and `POST /me/share-link/regenerate` to `backend/src/app/api/v1/me_router.py`, gated to the Trainer role through the existing role dependency
+- [ ] T241 [US6] Create `backend/src/app/api/v1/trainer_router.py` with `GET /trainer/players`, plus its `TrainerPlayerSummary`/`TrainerPlayerPage` schemas — the response carries **nothing** about a player's other trainers, not an identifier and not a count (FR-090)
+- [ ] T242 [US6] Add the roster query to `backend/src/app/repositories/association_repository.py` — joined to profile and player detail, rendering an erased account as "Deleted User" (FR-091) and deriving age from `date_of_birth` rather than storing it (research R-31)
+- [ ] T243 [US6] Register `join_router` and `trainer_router` in `backend/src/app/main.py`, and confirm the public routes sit outside the session dependency
+- [ ] T244 [US6] Add the `seed-demo-trainer` command to `backend/src/app/cli.py`, printing one trainer's credentials and standing join URL — without it, obtaining a link from a cold start requires signing in as a trainer first, which is the loop quickstart US6 needs to break
+- [ ] T245 [P] [US6] Create the join preview query hook in `frontend/src/entities/join/api/use-join-preview.ts` using `joinKeys.preview(code)`
+- [ ] T246 [P] [US6] Create `joinRegistrationSchema` in `frontend/src/features/join/register/model/schema.ts`, mirroring `JoinRegistrationRequest` — the age band is a cross-field refinement attached to `date_of_birth`, matching the backend validator exactly (frontend-contracts §10)
+- [ ] T247 [US6] Build the registration form in `frontend/src/features/join/register/ui/join-register-form.tsx` — TanStack Form with `revalidateLogic({ mode: 'submit', modeAfterSubmission: 'change' })`, the payload routed through the **existing** `normalizeEmptyToNull`, errors rendered through `fieldErrorText`, and a 422 mapped with `toServerErrorMap`. No second normalizer (Principle VI)
+- [ ] T248 [US6] Create `frontend/src/pages/join/index.tsx` and `frontend/src/routes/join.$code.tsx` — a **public** route beside `login.tsx`, not under `_authed`, which would redirect away the very visitor the page exists for. Branch on `viewer.state`, never on a local reading of the session
+- [ ] T249 [P] [US6] Build the share-link panel in `frontend/src/features/trainer/share-link/` — display, copy-to-clipboard, and regenerate with a confirmation that names what regenerating does and does not break
+- [ ] T250 [US6] Create the trainer area shell — `frontend/src/routes/_authed/trainer.tsx` as a layout route with a 403 view unless the role is `trainer`, plus `frontend/src/routes/_authed/trainer/portal.tsx` and `frontend/src/pages/trainer-portal/index.tsx` carrying the link panel. Branding joins this page in US8; it is one screen, as the epic's "My Portal Settings" describes
+- [ ] T251 [P] [US6] Create `rosterSearchSchema` and the roster query hook in `frontend/src/entities/trainer-context/`, keyed under `ctxKeys.players(trainerId, search)`
+- [ ] T252 [US6] Build `frontend/src/widgets/trainer-roster-table/`, `frontend/src/pages/trainer-players/index.tsx`, and `frontend/src/routes/_authed/trainer/players.tsx` — reusing the directory's 500 ms debounce and `replace: true` search navigation from D-04, with paging and filters pushing normal history entries
+
+**Checkpoint**: US6 is independently demonstrable — a stranger with a link becomes a player on a
+trainer's roster, and every refusal path is silent about why. SC-015, SC-019, SC-020, and SC-021
+pass.
+
+---
+
+### Extension Phase C: User Story 7 — Several Trainers, and Switching Between Them (Priority: P2)
+
+**Goal**: One account holds many trainers. The active one is resolved and enforced server-side, and
+nothing a player or a trainer can reach crosses the boundary between them.
+
+**Independent Test**: Associate one player with two trainers; confirm exactly one account exists,
+both appear in the switcher, every view shows only the active trainer's data, and the choice
+survives signing out and back in on another device.
+
+**Depends on**: Extension Phase B — a player must be able to join one trainer before they can join
+two.
+
+#### Tests for User Story 7
+
+- [ ] T253 [P] [US7] Write `backend/tests/integration/test_join_accept.py` asserting a signed-in player joins a second trainer with no new account, that repeating the call returns `already_associated` without a second row, and that `use_count` does **not** move on the repeat (FR-082)
+- [ ] T254 [P] [US7] Write `backend/tests/integration/test_trainer_context.py` covering the switch, restoration of the last-used context on a fresh session, and that naming a trainer the caller is not associated with returns **404, not 403** — a 403 would confirm that trainer exists (FR-090)
+- [ ] T255 [P] [US7] Write `backend/tests/integration/test_trainer_isolation.py` — a two-trainer fixture walked against **every** trainer-facing route, asserting the other trainer's identifiers and names appear in no response body. Routes are discovered from the app's route table, not hand-listed, so a new endpoint cannot be added without an isolation assertion. **This test is SC-025**
+- [ ] T256 [P] [US7] Write `backend/tests/integration/test_context_repair.py` asserting that deactivating the active trainer moves the player to another Active association, that deactivating all of them leaves a valid zero-trainer state rather than an error, and that reactivation restores the trainer to the switcher (FR-089)
+- [ ] T257 [P] [US7] Write `backend/tests/integration/test_erasure_associations.py` asserting an erased player keeps every association and appears on each roster as "Deleted User" with roster counts unchanged (FR-091, SC-008), and that erasing a trainer revokes their share links
+- [ ] T258 [P] [US7] Write `frontend/tests/widgets/trainer-context-switcher.test.tsx` with MSW, asserting the switcher is hidden at one trainer, listed at two, and that the `ctx` query namespace is emptied before the first render after a switch
+
+#### Implementation for User Story 7
+
+- [ ] T259 [P] [US7] Create `backend/src/app/schemas/trainer_context.py` with `TrainerContextEntry`, `TrainerContextList`, and `TrainerContextRequest`
+- [ ] T260 [US7] Create `backend/src/app/services/trainer_context_service.py` — the resolve-and-repair function of research R-24 (a stored context whose association is missing, inactive, or whose trainer is not Active is replaced and the correction written back), plus list and switch. Every caller goes through it; no caller trusts the column as read
+- [ ] T261 [US7] Add `get_trainer_context` to `backend/src/app/core/deps.py` as a FastAPI dependency, the same shape R-14 gives the role gate. **No endpoint may accept a `trainer_id` parameter to select context** (research R-25) — an endpoint that forgets the check is then merely wrong, not vulnerable
+- [ ] T262 [US7] Add `POST /join/{code}/accept` to `backend/src/app/api/v1/join_router.py` — associate, switch context, and refuse a non-`player_parent` role with `role_cannot_join`, writing nothing (FR-081)
+- [ ] T263 [US7] Add `GET /me/trainers` and `PUT /me/trainer-context` to `backend/src/app/api/v1/me_router.py`, both gated to the Player/Parent role
+- [ ] T264 [US7] Extend `CurrentUser` in `backend/src/app/schemas/auth.py` and its assembly in `backend/src/app/services/auth_service.py` with `active_trainer_id` and `trainer_count`, resolved through `trainer_context_service` so a stale context is repaired on the session read
+- [ ] T265 [US7] Extend `backend/src/app/services/erasure_service.py` with the data-model §20 delta — clear `player_name`, `date_of_birth`, and `active_trainer_user_id`; leave `gender` and every association intact; revoke the share links of an erased trainer; clear `logo_key` and remove the stored file
+- [ ] T266 [P] [US7] Extend the session type in `frontend/src/entities/session/` with `active_trainer_id` and `trainer_count`, and add the trainers query and switch mutation to `frontend/src/entities/trainer-context/api/`
+- [ ] T267 [P] [US7] Build `frontend/src/widgets/trainer-context-switcher/` — each trainer's logo and name, rendered only when `trainer_count > 1` (FR-088), with the open/closed flag as the one new `UiState` field (frontend-contracts §11)
+- [ ] T268 [US7] Mount the switcher in `frontend/src/widgets/app-shell/` beside the identity block, without disturbing the breadcrumb trail or back-control region D-05 established
+- [ ] T269 [US7] Wire the switch sequence in `frontend/src/entities/trainer-context/api/use-switch-context.ts` — await the mutation, then `queryClient.removeQueries({ queryKey: ctxKeys.root })`, **then** let the session refetch resolve. Removing after the session settles would render one frame from the previous context, which is what FR-087 forbids
+- [ ] T270 [P] [US7] Add the zero-trainer empty state to the player landing view in `frontend/src/pages/dashboard/index.tsx` — an account with no association is valid, not an error (research R-24)
+- [ ] T271 [US7] Add the `can_join` and `already_associated` branches to `frontend/src/pages/join/index.tsx` — one confirm button, and a link into the trainer's context respectively
+- [ ] T272 [US7] Add a test to `frontend/tests/` asserting that every query key touching trainer-scoped data begins `['ctx', trainerId]` — the convention is only worth fixing now if it is enforced now (research R-26)
+
+**Checkpoint**: US6 and US7 both work independently. One account spans trainers, the boundary
+between them holds under a route-table sweep, and SC-016, SC-017, SC-018, and SC-025 pass.
+
+---
+
+### Extension Phase D: User Story 8 — A Trainer Brands Their Portal (Priority: P3)
+
+**Goal**: A trainer's logo and colour appear for them, for their players in their context, and on
+their join page — and nowhere else.
+
+**Independent Test**: As a trainer, upload a logo and set a colour; confirm a player associated with
+that trainer sees both, a player in another trainer's context sees the platform default, and
+`/login` is never branded.
+
+**Depends on**: Extension Phase A. Scenario 6 of the story — branding following a context switch —
+additionally needs Extension Phase C; every other scenario is testable without it.
+
+#### Tests for User Story 8
+
+- [ ] T273 [P] [US8] Write `backend/tests/integration/test_branding.py` covering read, colour update, reset, that an omitted key leaves the colour unchanged while an explicit `null` clears it (Principle VI), and that a Coach and a Player/Parent both receive 403 (FR-093)
+- [ ] T274 [P] [US8] Write `backend/tests/integration/test_branding_logo.py` covering an accepted PNG, a 3 MB file refused with 413, a mislabelled `.pdf` refused with 422, a 1200×1200 PNG **fitted rather than refused** (FR-096), a hostile SVG refused, and a replaced logo's previous file becoming unreachable (FR-103)
+- [ ] T275 [P] [US8] Write `backend/tests/integration/test_branding_media.py` asserting `GET /media/branding/{key}` serves without a session, and that an SVG response carries `X-Content-Type-Options: nosniff` and the `default-src 'none'` content-security policy (research R-27)
+- [ ] T276 [P] [US8] Write `frontend/tests/widgets/branding-provider.test.tsx` asserting the provider sets the custom properties from the session's branding, falls back to the platform default when it is absent, and repaints on a context switch with no frame showing the previous trainer's identity (SC-024)
+
+#### Implementation for User Story 8
+
+- [ ] T277 [P] [US8] Create `backend/src/app/schemas/branding.py` with `PortalBranding` and `PortalBrandingUpdate` — `primary_color` is `str | None` matching `^#[0-9a-fA-F]{6}$`, and the update model is read with `model_dump(exclude_unset=True)` so an omitted key and an explicit `null` stay distinguishable
+- [ ] T278 [US8] Create `backend/src/app/services/branding_service.py` with `resolve_for_viewer(user)` — a trainer resolves their own, a `player_parent` resolves the active context's, Super Admin and unauthenticated resolve the platform default, and **coach returns the default with a `TODO(US-01.08)` naming the one line that changes** when the employer link exists (research R-33). This is a known gap between FR-101 as written and what ships
+- [ ] T279 [US8] Add update, reset, and the logo lifecycle to `backend/src/app/services/branding_service.py` — upload validates through `image_processing` or `svg_screening` by type, stores through the existing photo storage port, and removes the previous file on replace or reset
+- [ ] T280 [P] [US8] Add fit-to-200×200 with preserved aspect ratio to `backend/src/app/services/image_processing.py` for raster logos. Vector logos are not resized — they scale (FR-096)
+- [ ] T281 [US8] Add `GET`/`PATCH /me/branding`, `PUT`/`DELETE /me/branding/logo`, and `POST /me/branding/reset` to `backend/src/app/api/v1/me_router.py`, all gated to the Trainer role
+- [ ] T282 [US8] Add the **unauthenticated** `GET /media/branding/{key}` to `backend/src/app/api/v1/media_router.py` with the `nosniff` and content-security-policy headers on SVG responses. This is a deliberate departure from the authenticated photo endpoint, recorded in plan.md §Complexity Tracking — FR-073 puts branding on a page reached before an account exists
+- [ ] T283 [US8] Wire `portal_branding` into `CurrentUser` in `backend/src/app/schemas/auth.py` and into `JoinLinkPreview` in `backend/src/app/schemas/join.py`, both through `branding_service.resolve_for_viewer` — one resolution, server-side; the client must not decide whose branding applies (frontend-contracts §14)
+- [ ] T284 [US8] Create `brandingSchema` and the branding form in `frontend/src/features/trainer/branding/` — colour picker with live preview, logo file input with in-place preview, and **nothing applied to anyone until save** (FR-097)
+- [ ] T285 [P] [US8] Build `frontend/src/widgets/branding-provider/` — reads the branding, calls `brandPalette`, and sets CSS custom properties on a wrapper element, overriding the `DESIGN_TOKENS.md` defaults. No component reads `primary_color` and no component holds a hex literal, which is what keeps the design-token rule intact under runtime theming
+- [ ] T286 [US8] Mount the provider in `frontend/src/routes/_authed.tsx` and in `frontend/src/routes/join.$code.tsx`, whose branding comes from the preview response rather than the session. `/login` and `/set-password` stay on the platform default (FR-101)
+- [ ] T287 [US8] Add the branding half to `frontend/src/pages/trainer-portal/index.tsx` beside the share-link panel from T250, with the reset control (FR-100)
+- [ ] T288 [P] [US8] Render every logo through `<img>` with `resolveMediaUrl` in `frontend/src/widgets/app-shell/`, `frontend/src/widgets/trainer-context-switcher/`, `frontend/src/widgets/trainer-roster-table/`, and `frontend/src/pages/join/index.tsx` — never `<object>`, `<embed>`, or inline SVG. This is the layer of R-27's defence that holds even if the server-side screening is wrong
+- [ ] T289 [P] [US8] Add the branded join page rendering to `frontend/src/pages/join/index.tsx` so a visitor sees the trainer's identity before entering any detail (FR-073)
+- [ ] T290 [US8] Verify that a branding save reaches a signed-in player and coach on their next view without a sign-out, by invalidating `branding` and `session` in the mutation's `onSuccess` in `frontend/src/features/trainer/branding/api/use-update-branding.ts` (FR-102, SC-022)
+
+**Checkpoint**: All three extension stories work independently. SC-022, SC-023, and SC-024 pass, and
+the extension is functionally complete except for the coach audience of FR-101, which is blocked on
+US-01.08.
+
+---
+
+### Extension Phase E: Polish & Cross-Cutting Concerns
+
+- [ ] T291 Extend `backend/tests/integration/test_permission_matrix.py` to cover every route the extension adds — join, share-link, trainers, trainer-context, branding, branding media, and roster — confirming the route-table discovery in T144 picks them up automatically rather than needing them hand-listed (SC-002)
+- [ ] T292 Regenerate and re-run the contract test in `backend/tests/contract/test_openapi_contract.py` against `contracts/openapi.yaml` v1.1.0, failing on any drift across its 33 operations and 37 schemas
+- [ ] T293 [P] Add the two extension greps from quickstart.md §Quality gates to `.github/workflows/ci.yml` — no `trainer_id` arriving as a query or path parameter outside the admin router (research R-25), and no logo rendered through `<object>`, `<embed>`, or `dangerouslySetInnerHTML` (research R-27). Both must print nothing
+- [ ] T294 [P] Accessibility pass over the join form, the branding controls, and the context switcher — labels, focus management, keyboard operation of the switcher dropdown and the colour picker — across `frontend/src/features/join/`, `frontend/src/features/trainer/`, and `frontend/src/widgets/trainer-context-switcher/`
+- [ ] T295 [P] Add loading, empty, and error states across `frontend/src/pages/join/index.tsx`, `frontend/src/widgets/trainer-roster-table/`, `frontend/src/widgets/trainer-context-switcher/`, and `frontend/src/features/trainer/branding/`, including the zero-trainer and zero-player cases
+- [ ] T296 [P] Extend `backend/src/app/services/maintenance_service.py` to prune `link_lookup_attempts` alongside sessions and sign-in attempts
+- [ ] T297 Verify SC-016 and SC-018 by timing an accept-and-land and a context switch, and record the measurements in `specs/001-user-roles-admin/quickstart.md` beside the existing SC-006 measurement
+- [ ] T298 Run the full quality gate from quickstart.md §6 — ruff, mypy strict, pytest, ESLint including the boundaries rule, `tsc -b --noEmit`, Vitest — and fix every finding introduced by T205–T297
+- [ ] T299 Walk every scenario in quickstart.md US6, US7, and US8 manually and reconcile any divergence between documented and actual behaviour
+- [ ] T300 [P] Update `backend/README.md` and `frontend/README.md` with the join flow, the server-resolved context rule, and the `['ctx', …]` key convention that every later epic inherits
+
+---
+
+### Extension: Dependencies & Execution Order
+
+```
+Extension A (T205–T224)
+        │
+        ├──▶ Extension B / US6 (T225–T252) ──▶ Extension C / US7 (T253–T272) ──┐
+        │                                                                       ├──▶ Extension E
+        └──▶ Extension D / US8 (T273–T290) ─────────────────────────────────────┘      (T291–T300)
+                        ▲
+                        └── scenario 8.14 only (branding across a context switch) needs C
+```
+
+- **Extension A is the single entry point.** Every other task depends on the schema and the two
+  primitives it creates
+- **US7 depends on US6**: a player must be able to join one trainer before joining two. This is a
+  genuine dependency, not a sequencing preference — `POST /join/{code}/accept` extends the router
+  T239 creates, and the context switcher has nothing to switch between until associations exist
+- **US8 depends only on A** for everything except scenario 8.14. A second developer can take US8 in
+  parallel with US6 and US7 the moment A is done; only the context-switch branding test waits
+- **Within US6**, backend precedes frontend: T245–T252 consume the endpoints T239–T243 expose
+- **Extension E depends on B, C, and D**
+
+### Extension: Same-File Serialization
+
+Additions to the two lists above; these must not be parallelized despite sitting in different phases:
+
+- `backend/src/app/models/role_details.py` — T208, T209
+- `backend/src/app/models/enums.py` — T205 (nothing else in the extension touches it)
+- `backend/src/app/api/v1/me_router.py` — T240, T263, T281
+- `backend/src/app/api/v1/join_router.py` — T239, T262
+- `backend/src/app/api/v1/media_router.py` — T282
+- `backend/src/app/schemas/auth.py` — T264, T283
+- `backend/src/app/schemas/join.py` — T233, T283
+- `backend/src/app/services/share_link_service.py` — T234, T236
+- `backend/src/app/services/branding_service.py` — T278, T279
+- `backend/src/app/services/user_admin_service.py` — T235 (and T080, T081, T120, T121, T167 from earlier phases)
+- `backend/src/app/services/erasure_service.py` — T265 (and T129–T131 from Phase 7)
+- `backend/src/app/services/image_processing.py` — T280
+- `backend/src/app/repositories/association_repository.py` — T214, T242
+- `backend/src/app/core/deps.py` — T261
+- `backend/src/app/core/config.py` — T220 (and T015, T187, T188)
+- `backend/src/app/cli.py` — T244 (and T145, T146)
+- `frontend/src/entities/user/api/query-keys.ts` — T223
+- `frontend/src/shared/api/types.ts` — T222
+- `frontend/src/pages/join/index.tsx` — T248, T271, T289
+- `frontend/src/pages/trainer-portal/index.tsx` — T250, T287
+- `frontend/src/pages/dashboard/index.tsx` — T270 (and T067, T203)
+- `frontend/src/routes/_authed.tsx` — T286 (and T039, T202)
+- `frontend/src/widgets/app-shell/` — T268 (and T200, T201)
+- `frontend/src/routes/__root.tsx` — **no extension task touches this file.** Recorded so the
+  omission stays deliberate: the branding provider mounts at `_authed` and at the join route, never
+  at the root, because the root also carries `/login` and `/set-password`, which must show the
+  platform default (FR-101)
+
+### Extension: Parallel Example — Phase A
+
+```bash
+# The three repositories and the two pure primitives are independent files:
+Task: "Create share_link_repository.py"                 # T213
+Task: "Create association_repository.py"                # T214
+Task: "Create link_lookup_attempt_repository.py"        # T215
+Task: "Create svg_screening.py"                         # T216
+Task: "Create brand-palette.ts"                         # T218
+
+# Then their tests, also independent:
+Task: "test_svg_screening.py"                           # T217
+Task: "brand-palette.test.ts — the SC-023 contrast sweep"  # T219
+```
+
+### Extension: Parallel Example — User Story 6 tests
+
+```bash
+# All seven US6 test files are different files with no shared fixtures beyond conftest:
+Task: "test_share_link_service.py"      # T225
+Task: "test_join_preview.py"            # T226
+Task: "test_join_register.py"           # T227
+Task: "test_join_validation.py"         # T228
+Task: "test_join_link_throttle.py"      # T229
+Task: "test_trainer_roster.py"          # T230
+Task: "join.test.tsx"                   # T231
+```
+
+### Extension: Implementation Strategy
+
+**Extension MVP — US6 only**
+
+1. Extension Phase A (T205–T224) — schema, repositories, primitives
+2. Extension Phase B (T225–T252) — US6
+3. **STOP and VALIDATE**: walk quickstart US6 end to end
+4. Deployable: trainers can hand out a link and players can join themselves. That alone removes the
+   Super Admin from the player-onboarding path, which is the extension's whole business case
+
+**Incremental delivery**
+
+1. A → B → demo self-service onboarding (SC-015, SC-019, SC-020, SC-021)
+2. + C → demo one account across two trainers with provable isolation (SC-016 – SC-018, SC-025)
+3. + D → demo a branded portal (SC-022 – SC-024)
+4. + E → gates green, timings recorded
+
+**Parallel team strategy**
+
+With two developers, once Phase A is done: one takes B then C (they are a chain), the other takes D
+in full. They meet at Phase E. D's only wait is the single context-switch branding test.
+
+### Extension: Traceability
+
+| Story | Spec requirements | Plan decisions | Success criteria | Tasks |
+|---|---|---|---|---|
+| Foundational | data-model §15–§24 | R-21, R-22, R-27, R-29, R-30, R-31, R-32 | — | T205–T224 |
+| **US6** | FR-065 – FR-083 | R-21, R-22, R-23, R-30, R-31 | SC-015, SC-019, SC-020, SC-021 | T225–T252 |
+| **US7** | FR-084 – FR-092 | R-24, R-25, R-26 | SC-016, SC-017, SC-018, SC-025 | T253–T272 |
+| **US8** | FR-093 – FR-104 | R-27, R-28, R-29, R-33 | SC-022, SC-023, SC-024 | T273–T290 |
+| Polish | SC-002, quality gates | — | SC-002 | T291–T300 |
+
+### Extension: Open decision to raise before implementation
+
+**FR-101's coach clause cannot ship in this slice.** A coach will see the platform default rather
+than their trainer's branding, because which trainer a coach works for is US-01.08 — out of scope —
+so `coach_details` has no employer column and nothing could populate one. T278 carries the branch
+and the `TODO(US-01.08)`.
+
+Everything else in User Story 8 ships complete. **If the coach audience is required now, the
+coach-to-trainer link has to come into scope with it** — that is a specification decision, and it
+would add tasks to Extension Phase D rather than change any task already listed. Nothing else in
+this extension is blocked; implementation may begin at T205.

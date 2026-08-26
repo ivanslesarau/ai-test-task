@@ -443,3 +443,316 @@ Version-sensitive claims above were checked against:
 Architectural decisions R-03, R-08, R-09, R-10, R-14, R-15, and R-16 follow from the specification's
 own requirements rather than from external documentation, and are argued from those requirements
 above.
+
+---
+
+# Phase 0 Research — Extension: ShareLink Onboarding, Multi-Trainer & Portal Branding
+
+**Date**: 2026-08-26 | **Covers**: spec FR-065 – FR-104, SC-015 – SC-025, User Stories 6–8
+
+**Note on sources**: Context7 MCP is connected in this session, unlike the original Phase 0 run.
+R-27's claims about Python's XML parsers were checked against the CPython documentation through it
+and are cited at the end. The remaining decisions follow from the specification and from the
+architecture already built, and are argued from those.
+
+## Part C — Decisions for the extension
+
+### R-21: ShareLink codes are stored in clear, unlike every other token in this system
+
+**Decision**: `share_links.code` holds the URL-safe code **as issued**, indexed and unique. It is
+generated with `secrets.token_urlsafe(16)` — 128 bits of entropy in 22 characters.
+
+**Rationale**: Sessions (R-03) and setup invitations (R-01) store only a SHA-256 of their secret,
+because those secrets are shown once and a database leak must not yield a usable credential. A
+standing player ShareLink is the opposite kind of object: FR-069 requires the trainer to be able to
+**see and copy it again at any time**, and a hash cannot be un-hashed to satisfy that. The link is
+also designed to be published — printed on a flyer, posted publicly — so its confidentiality is not
+a security property at all. What it grants is exactly one thing: the right to become a player of one
+trainer, which the trainer is offering to the public anyway.
+
+128 bits is nonetheless the entropy floor, because FR-066 forbids codes that can be found by trying
+values and FR-070 must not become a trainer-enumeration oracle. Combined with the per-origin
+throttle in R-30, SC-021's 10,000-attempt trial cannot succeed.
+
+**Alternatives rejected**:
+
+- *Hash the code like the others.* Then `GET /me/share-link` cannot render the link, and the trainer
+  would have to regenerate — and reprint — every time they lost the copy. That defeats the purpose
+  of a standing link.
+- *Store a hash and keep a decryptable copy.* A reversible encryption key sitting beside the data it
+  protects is theatre; it adds a key to manage and changes nothing an attacker faces.
+- *Short human-friendly codes (`ABC123`, as the epic's example URL shows).* Six alphanumerics is
+  ~31 bits, which a throttle alone cannot defend for a link that never expires. The epic's URL is
+  illustrative; the requirement it must satisfy is FR-066.
+
+### R-22: One standing link per trainer, created with the account
+
+**Decision**: A `share_links` row of kind `player_standing` is created **in the same transaction as
+the trainer account**, and a data migration backfills one for every trainer that already exists.
+`GET /me/share-link` is therefore a pure read. Regenerating deactivates the current row
+(`is_active = false`, `revoked_at` set) and inserts a new one; old rows are never deleted, because
+`trainer_player_associations.share_link_id` points at them and FR-069 requires those associations to
+survive.
+
+**Rationale**: The obvious alternative — create the link lazily on first read — turns a `GET` into a
+write, which means an idempotent-looking endpoint takes the SQLite write lock and can conflict with
+an administrative action already holding it (plan.md §Technical Context). Creating it eagerly costs
+one row per trainer and removes the whole class of problem. The spec's assumption fixes the count at
+one standing link per trainer, so there is no collection to manage.
+
+**Alternatives rejected**: lazy creation (above); many named links per trainer (that is campaign
+tracking, which the spec defers to Epic-06).
+
+### R-23: Joining is one transaction, and there are three ways in
+
+**Decision**: Three operations, each atomic:
+
+| Operation | Caller | Effect |
+|---|---|---|
+| `GET /join/{code}` | anyone | Read-only preview: trainer business name and branding, or a flat refusal |
+| `POST /join/{code}/register` | no session | Account + profile + player detail + parent contact + association + session, in **one** transaction |
+| `POST /join/{code}/accept` | signed-in `player_parent` | Association only, plus a context switch |
+
+FR-083 requires that a failed registration leave nothing behind, which a single
+`async with session.begin()` in `join_service` gives for free. The alternative — reusing
+`user_admin_service.create_user` and then associating in a second call — would leave an orphaned
+account whenever the second call failed, and would also have to suppress the invitation email that
+path sends.
+
+**On the duplicate-email race** (spec edge case): the transaction relies on the existing unique index
+on `users.email`, catching `IntegrityError` in the service and translating it to the same
+`email_taken` domain error the admin path already raises. Checking first and inserting second is a
+race by construction; the index is the only thing that is actually atomic.
+
+### R-24: The active trainer context lives on the player's row, not in the session
+
+**Decision**: `player_details.active_trainer_user_id`, nullable, FK → `users.id`.
+
+**Rationale**: FR-086 requires the last-used trainer to be restored **at sign-in, on any device**.
+That rules out anything session-scoped (a new sign-in creates a new session row, so the value would
+reset) and anything browser-scoped (`localStorage` is per-device, and the spec's assumption states
+the value is remembered against the account). A column on the player's own detail row is the
+narrowest place that satisfies both: it is already one-to-one with the account, it is only
+meaningful for `player_parent` accounts, and it costs no join on the session read that needs it.
+
+The column is nullable because a player may legitimately hold zero associations — a Super
+Admin-created account (FR-030) or one whose only trainer was deactivated (FR-089). Reading it always
+goes through one service function that repairs a dangling or stale value rather than trusting it:
+if the referenced association is missing, inactive, or its trainer is not Active, the service picks
+another Active association and writes the correction back.
+
+**Alternatives rejected**: a column on `sessions` (dies with the session); `localStorage`
+(per-device, and the server could not enforce it); a `last_used_at` column on the association row,
+picking the maximum (it makes "which context am I in" a query with a tie-break rather than a fact,
+and switching context becomes an update whose meaning depends on clock ordering).
+
+### R-25: Context is resolved server-side; the client never names a trainer
+
+**Decision**: No endpoint takes a `trainer_id` parameter to select context. Context-scoped reads
+resolve the trainer from `active_trainer_user_id` for the calling account. Switching is one
+operation, `PUT /me/trainer-context`, whose body names the trainer to switch to and which validates
+that the caller holds an Active association with it.
+
+**Rationale**: FR-087 makes context a **data-isolation boundary**, not a display preference, and
+FR-090 makes leakage across it a confidentiality failure. If the trainer came in as a request
+parameter, every endpoint that Epics 02–08 add would have to remember to validate that the caller is
+associated with the trainer it names — and one forgotten check is a cross-tenant read. Resolving
+context from the caller's own row means an endpoint that forgets is not vulnerable, merely wrong,
+and the check lives in one dependency (`get_trainer_context`) exactly as R-14 puts the role gate in
+one dependency.
+
+The cost is that context is server state, so the client must invalidate cached data when it changes;
+R-26 handles that.
+
+**Alternatives rejected**: `?trainer_id=` per endpoint (above); an `X-Trainer-Context` header (same
+validation burden, plus it is invisible in a URL, so a bug reproduces only with the header attached,
+and TanStack Query would have to carry it in the key anyway).
+
+### R-26: Context-scoped query keys are namespaced, and switching drops that namespace
+
+**Decision**: Every TanStack Query key for data that belongs to one trainer is namespaced
+`['ctx', trainerId, ...]`. Switching context calls the mutation, awaits it, then
+`queryClient.removeQueries({ queryKey: ['ctx'] })` and refetches the session.
+
+**Rationale**: Namespacing is what makes scenario 4 of User Story 7 — "nothing belonging to Trainer A
+remains on screen" — structurally true rather than a thing to remember: a component asking for
+context data under the new trainer's namespace cannot be handed the old trainer's cached response,
+because that response is filed under a different key. The `removeQueries` call is then a
+memory concern and a belt-and-braces guarantee, not the mechanism.
+
+This feature has almost nothing context-scoped yet — the trainer's branding and the roster are the
+only entries — which is precisely why the convention is fixed **now**, in
+`contracts/frontend-contracts.md` §2, before Epics 02–08 add calendars, tokens, and content to it.
+Retrofitting a namespace across eight epics' query keys is the expensive version of this decision.
+
+**Alternative rejected**: `queryClient.clear()` on switch. It works, and it is one line, but it also
+discards the session and every non-context query, so the whole application re-fetches on a switch
+that SC-018 gives two seconds.
+
+### R-27: SVG logos are accepted, screened with the standard library, and served so they cannot execute
+
+**Decision**: Three layers, and **no new dependency**:
+
+1. **Screen before storing.** Reject the upload outright if the bytes contain a `<!DOCTYPE`
+   declaration, then parse with `xml.etree.ElementTree` and reject if the tree contains a `script`
+   or `foreignObject` element, any attribute beginning `on`, or any `href`/`xlink:href` whose value
+   does not begin `#`. Roughly thirty lines in `services/svg_screening.py`, no allowlist to keep
+   current.
+2. **Serve inertly.** `GET /media/branding/{key}` responds with `Content-Type: image/svg+xml`,
+   `X-Content-Type-Options: nosniff`, and `Content-Security-Policy: default-src 'none'; style-src
+   'unsafe-inline'`.
+3. **Render only through `<img>`.** No `<object>`, no `<embed>`, no inlining into the DOM. A browser
+   does not execute script in an SVG loaded as an image, which is the layer that holds even if the
+   other two are wrong.
+
+**Rationale**: FR-094 accepts SVG because the epic's validation rules list it; FR-095 requires
+active content removed. The constitution's stack rule forbids adding a dependency without an
+amendment, so a sanitizer library is not available — and would be disproportionate anyway. The
+DOCTYPE pre-check is what makes stdlib parsing safe here: CPython's parsers sit on libexpat, which
+by default reaches neither local files nor the network, and recent expat additionally caps entity
+expansion amplification — but refusing a DOCTYPE forecloses that entire class before the parser
+sees it, rather than depending on which expat the host happens to ship.
+
+**Alternatives rejected**:
+
+- *Reject SVG.* Defensible, and one line — but a logo is exactly the asset a designer hands over as
+  a vector, and rasterizing it costs the crispness that made it a vector.
+- *Rasterize to PNG on upload.* Needs a renderer (`cairosvg`), which is a stack amendment, and
+  throws away the resolution independence.
+- *Sanitizer library.* Same amendment problem, for a screening job that is a dozen predicates.
+
+### R-28: Branding lives on `trainer_organizations`, not in a new table
+
+**Decision**: Three columns added to the existing table — `logo_key`, `primary_color`,
+`branding_updated_at`.
+
+**Rationale**: Branding is one-to-one with a trainer, the table is already one-to-one with a
+trainer, and every read that wants the business name also wants the logo (the join page shows both).
+A separate table would be a mandatory join on the hottest read in the feature to hold three columns.
+The Phase-2 additions the epic names — a second logo for dark mode, a font choice — are two more
+columns, not a growth in cardinality, so the shape does not change under them.
+
+**Alternative rejected**: `trainer_portal_branding` as its own table. Right if branding were
+versioned or multi-row; it is neither.
+
+### R-29: The brand colour is stored exactly as chosen; the readable palette is derived at render
+
+**Decision**: `primary_color` stores the hex the trainer picked, validated as `#rrggbb`. The palette
+the interface actually paints with is computed by one pure function,
+`shared/lib/brand-palette.ts`, which takes the primary colour and returns CSS custom property values
+overriding the `DESIGN_TOKENS.md` defaults on a wrapper element. For any surface that carries text,
+the function walks the primary colour's lightness until the token foreground reaches a WCAG
+relative-luminance contrast ratio of at least 4.5:1; the trainer's exact colour is kept for
+non-text accents — borders, the gradient's stops, focus rings.
+
+**Rationale**: FR-098 says the chosen colour drives accents and the gradient; FR-099 says text stays
+legible; SC-023 measures 4.5:1. Simply picking black or white text against the raw colour does not
+always reach 4.5:1 — there is a narrow band of mid-tones where neither candidate does — so the
+surface, not the text, is what must move. Storing the chosen colour unmodified means a later design
+change re-derives everything, and it means the colour the trainer sees in the picker is the colour
+that comes back when they reopen the settings.
+
+Deriving in the browser rather than the server keeps the stored value canonical and costs nothing:
+the computation is a dozen lines of arithmetic on a value already in the session response.
+
+**Alternatives rejected**: storing a derived palette (the derivation becomes data, so a design change
+needs a migration); refusing colours that fail contrast (the trainer's brand colour is not
+negotiable, and the epic offers no such rejection).
+
+### R-30: Throttling link lookups gets its own durable counter
+
+**Decision**: A new table, `link_lookup_attempts` (`client_ip`, `attempted_at`, `successful`),
+counted the same way R-06 counts sign-in attempts: 10 failed lookups from one origin in a trailing
+15 minutes refuses further lookups, and the window slides so access resumes without intervention.
+Pruned by the maintenance routine that already prunes `sign_in_attempts` and `sessions`.
+
+**Rationale**: FR-071 is per-origin only — there is no second dimension, since an invalid code
+identifies nobody. The reasoning for durability is R-06's unchanged: an in-memory counter resets on
+deploy and does not exist across processes.
+
+**Alternative rejected**: adding a `kind` column to `sign_in_attempts` and reusing it. It avoids a
+table at the cost of migrating a table that already holds production rows and of making every
+existing rate-limit query carry a filter it did not need. Two narrow tables with the same shape are
+cheaper than one general one here.
+
+### R-31: The player's age is stored as a date of birth
+
+**Decision**: `player_details.date_of_birth` (date, nullable). The registration form collects a date
+of birth; the age FR-074 and FR-077 speak of is derived from it at validation and at display.
+
+**Rationale**: An age integer is wrong within twelve months of being written, and it is written once
+at registration and read for years — by Epic-02's age-bracketed events and Epic-03's CRM. Storing
+the fact and deriving the number keeps FR-077's rule exactly as specified (self ⇒ 18 or over,
+dependant ⇒ 1 to 18, evaluated on the derived age at registration) while keeping the stored value
+true afterwards. The epic's own data requirements say "age **or** birth date", so this is the
+permitted reading.
+
+**Recorded as a refinement, not a silent change**: FR-074 lists "age" among the fields the visitor
+supplies. What they supply is a date of birth, which supplies the age. If the client wants a
+literal age input, the field changes and the column does not.
+
+### R-32: Gender is a closed set
+
+**Decision**: `Gender` as a `StrEnum` — `male`, `female`, `other`, `prefer_not_to_say` — persisted as
+constrained text, matching how `UserRole` and `AccountStatus` are persisted (data-model §1).
+
+**Rationale**: Epic-02 groups events by gender and Epic-03 filters rosters by it, which free text
+cannot support without a cleanup pass later. Four values cover the epic's registration form without
+prejudging anything; `prefer_not_to_say` exists so the field can be required without forcing a
+disclosure.
+
+**Open**: the epic leaves the vocabulary undecided, as it does skill level (data-model §4.3). If the
+client names a different set, it is a constraint change and a data migration, not a redesign.
+
+### R-33: The coach half of FR-101 has no data to resolve yet — recorded, not worked around
+
+**Finding, not a decision**: FR-101 requires a trainer's branding to be shown to *that trainer's
+coaches*. Which trainer a coach works for is US-01.08, which the spec keeps out of scope, and
+`coach_details` accordingly has no employer column (data-model §4.2).
+
+**How the design handles it**: branding resolution is one function,
+`branding_service.resolve_for_viewer(user)`, with a branch per role — trainer resolves their own,
+`player_parent` resolves the active context's, Super Admin and unauthenticated resolve the platform
+default, and **coach returns the platform default with a `TODO(US-01.08)` naming the one line that
+changes** when the employer link exists. No column is added speculatively, because nothing would
+populate it.
+
+**Why not add the column now**: it would be the first piece of US-01.08 built ahead of its
+specification, which Principle I forbids, and an always-null column is not a partial implementation
+of anything. This is reported to the user with the plan rather than buried here.
+
+## Consolidated decisions (extension)
+
+| ID | Area | Decision |
+|----|------|----------|
+| R-21 | Link codes | Stored in clear, 128-bit `token_urlsafe`, unique and indexed |
+| R-22 | Link lifecycle | One standing link per trainer, created with the account, backfilled; regenerate revokes and inserts |
+| R-23 | Joining | Preview, register, and accept — register is one transaction; duplicate email caught on the index |
+| R-24 | Active context | `player_details.active_trainer_user_id`, repaired on read |
+| R-25 | Context scoping | Resolved server-side from the caller's row; no `trainer_id` parameter anywhere |
+| R-26 | Client caching | `['ctx', trainerId, ...]` key namespace; `removeQueries(['ctx'])` on switch |
+| R-27 | SVG | DOCTYPE refusal + stdlib screening + inert serving + `<img>`-only rendering; no new dependency |
+| R-28 | Branding storage | Three columns on `trainer_organizations` |
+| R-29 | Brand palette | Chosen colour stored as-is; readable surfaces derived in `shared/lib/brand-palette.ts` at ≥4.5:1 |
+| R-30 | Link throttling | `link_lookup_attempts`, 10 per 15 minutes per origin, sliding |
+| R-31 | Player age | Date of birth stored, age derived |
+| R-32 | Gender | Closed four-value enum |
+| R-33 | Coach branding | No employer link exists yet; one function branch carries the gap, flagged for US-01.08 |
+
+**No `[NEEDS CLARIFICATION]` markers were raised by the extension.** R-31, R-32, and R-33 are
+recorded as decisions the client may overturn cheaply, and R-33 is a dependency rather than a choice.
+
+## Sources (extension)
+
+- CPython documentation, `xml` security notes and `pyexpat` billion-laughs protections, retrieved
+  through Context7 (`/python/cpython`, `Doc/library/xml.rst`, `Doc/library/pyexpat.rst`) — used in
+  R-27 for the claims that Python's parsers reach neither local files nor the network by default and
+  that recent expat caps entity-expansion amplification.
+- [WCAG 2.2 — Contrast (Minimum) 1.4.3](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html)
+  for the 4.5:1 ratio and the relative-luminance formula used in R-29.
+- [RFC 2606](https://www.rfc-editor.org/rfc/rfc2606) — already cited by the erasure design, and the
+  reason `example.com` placeholders stay inert.
+
+Decisions R-21 through R-26, R-28, and R-30 through R-33 follow from the specification and from the
+architecture already in place, and are argued from those above rather than from external
+documentation.

@@ -320,3 +320,144 @@ Both should return nothing.
 | No invitation email | `EMAIL_BACKEND=filesystem` writes to disk, it does not send | Look in `EMAIL_OUTBOX_DIR` |
 | shadcn CLI writes to `src/components/ui` | `components.json` not pointing at `shared/ui` | Fix the aliases — the default path violates constitution IV |
 | Alembic autogenerate produces an empty revision | Models not imported in the migration environment | Import the model modules in `migrations/env.py` |
+
+---
+
+# Extension validation (2026-08-26): US6, US7, US8
+
+Run after the migrations `0005`–`0007` are applied. The seed path now prints one trainer's standing
+join link (data-model §24); without it, obtaining a link means signing in as a trainer first, which
+is the loop this walk needs to break.
+
+```bash
+cd backend
+uv run alembic upgrade head
+uv run python -m app.cli seed-demo-trainer        # prints: join URL + trainer credentials
+```
+
+## US6 — A Player or Parent Joins Through an Invitation Link
+
+**Setup**: one Trainer with a standing link (from the seed command, or `GET /me/share-link` while
+signed in as a trainer).
+
+| # | Action | Expected |
+|---|---|---|
+| 6.1 | Open `/join/{code}` in a browser with no session | Join page names the trainer's business and shows their branding; registration form offered (FR-073) |
+| 6.2 | `GET /api/v1/join/{code}` unauthenticated | 200; body carries **only** business name, branding, and `viewer.state: anonymous` — no trainer id, no contact detail |
+| 6.3 | Register with valid detail | 201; `Set-Cookie` present; already signed in; lands in that trainer's context (FR-078) |
+| 6.4 | `GET /me/trainers` as the new account | One entry — the link's trainer; `active_trainer_id` matches it |
+| 6.5 | Sign in as the trainer, open `/trainer/players` | The new player is on the roster |
+| 6.6 | Look in `EMAIL_OUTBOX_DIR` | One confirmation message naming the trainer (FR-079) |
+| 6.7 | Register again with the same email | 409 `email_already_registered`, telling the person to sign in and reopen the link (FR-076) |
+| 6.8 | Check the database after 6.7 | Exactly one account for that email; no orphan profile, player detail, or association (FR-083) |
+| 6.9 | Submit `is_self: true` with a date of birth 12 years ago | 422 with the error on `date_of_birth` — a self-registering player is 18 or over (FR-077) |
+| 6.10 | Submit `is_self: false` with a date of birth 30 years ago | 422 on `date_of_birth` — a dependant is 1 to 18 |
+| 6.11 | Submit `is_self: false` with no `player_name` | 422 on `player_name` |
+| 6.12 | Regenerate the link as the trainer, then open the old code | 404 `invitation_link_invalid` within seconds (SC-020) |
+| 6.13 | Check the associations after 6.12 | The player from 6.3 is still on the roster (FR-069) |
+| 6.14 | Deactivate the trainer, open their current code | 404, same message and body as 6.12 — the refusal does not say why (FR-070) |
+| 6.15 | Request 11 unknown codes from one origin | 11th returns 429 with `Retry-After` (FR-071) |
+| 6.16 | Wait out the window, request a valid code | 200 — access resumes with no intervention (SC-021) |
+
+Checking that the refusal discloses nothing (6.14):
+
+```bash
+curl -s http://localhost:8000/api/v1/join/definitely-not-a-real-code    > /tmp/a.json
+curl -s http://localhost:8000/api/v1/join/{revoked_code}                > /tmp/b.json
+diff /tmp/a.json /tmp/b.json && echo "identical — FR-070 holds"
+```
+
+The 10,000-attempt guessing trial SC-021 specifies belongs in the integration suite, not in a manual
+walk; `tests/integration/test_join_link_throttle.py` runs it against the throttle.
+
+## US7 — Several Trainers, and Switching Between Them
+
+**Setup**: Trainer A and Trainer B, each with a standing link; the player account from US6, already
+associated with A.
+
+| # | Action | Expected |
+|---|---|---|
+| 7.1 | Signed in as the player, open Trainer B's link | Confirm button, not a registration form (`viewer.state: can_join`, FR-080) |
+| 7.2 | `POST /join/{codeB}/accept` | 200; association created; `active_trainer_id` is now B |
+| 7.3 | Count accounts for that email | Exactly one (FR-085) |
+| 7.4 | Open Trainer B's link again | 200 with `already_associated: true`; no second association (FR-082) |
+| 7.5 | Compare `use_count` on link B before and after 7.4 | Unchanged (FR-068, FR-082) |
+| 7.6 | Sign out, sign back in | Active context is B — the last one used, on a fresh session (FR-086) |
+| 7.7 | Sign in on a second browser | Active context is still B (FR-086, "on any device") |
+| 7.8 | `PUT /me/trainer-context` naming Trainer A | 200; switcher shows both; every context view now shows A's data only |
+| 7.9 | Watch the network panel during 7.8 | The `ctx` query namespace is dropped before the first render; no view shows B's data for any frame (FR-087, R-26) |
+| 7.10 | `PUT /me/trainer-context` naming a trainer the player never joined | **404**, not 403 — a 403 would confirm that trainer exists (FR-090) |
+| 7.11 | As Trainer A, sweep every trainer-facing response for Trainer B's id or name | Nothing, in any field of any endpoint (FR-090, SC-025) |
+| 7.12 | Deactivate Trainer B, reload as the player | B is gone from the switcher; the player is moved to A (FR-089) |
+| 7.13 | Deactivate A as well | Switcher gone; the player is told they belong to no trainer — not an error page (FR-089) |
+| 7.14 | Reactivate A | A returns to the switcher and becomes the active context |
+| 7.15 | Sign in as a Coach and open a player link | 403 `role_cannot_join`; no association written (FR-081) |
+| 7.16 | Erase the player (Super Admin), then open Trainer A's roster | The row is still there as "Deleted User"; the roster count is unchanged (FR-091, SC-008) |
+| 7.17 | As a player with one trainer, look for the switcher | Not rendered (FR-088) |
+
+Scenario 7.11 is the one to automate rather than eyeball —
+`tests/integration/test_trainer_isolation.py` walks every trainer-facing route with a two-trainer
+fixture and asserts the other trainer's identifiers appear in no response body. That test **is**
+SC-025; the manual check is a spot check.
+
+## US8 — A Trainer Brands Their Portal
+
+**Setup**: Trainer A (branded during this walk), Trainer B (left at defaults), the multi-trainer
+player from US7.
+
+| # | Action | Expected |
+|---|---|---|
+| 8.1 | As Trainer A, open `/trainer/portal` | Branding controls and the invitation link on one page |
+| 8.2 | Choose a 500 KB PNG | Previewed in place; **not** applied anywhere until saved (FR-097) |
+| 8.3 | Save | Logo appears in the trainer's own header |
+| 8.4 | Pick a primary colour | Preview updates live; accents and the gradient follow it on save (FR-098) |
+| 8.5 | Upload a 3 MB PNG | 413; the existing logo is untouched (FR-094) |
+| 8.6 | Upload a `.pdf` renamed `.png` | 422 — the declared type does not match the decoded content |
+| 8.7 | Upload a 1200×1200 PNG | Accepted and fitted to 200×200 without distortion — not refused (FR-096) |
+| 8.8 | Upload an SVG containing `<script>alert(1)</script>` | 422; nothing stored (FR-095) |
+| 8.9 | Upload an SVG containing `<!DOCTYPE …>` with an entity | 422, refused before parsing (R-27) |
+| 8.10 | Upload a clean SVG, then `curl -i` its `/media/branding/{key}` | 200 with `X-Content-Type-Options: nosniff` and the `default-src 'none'` CSP header |
+| 8.11 | Inspect the rendered logo element | An `<img>` — never `<object>`, `<embed>`, or inline SVG (R-27) |
+| 8.12 | Replace the logo, then request the previous key | 404; the old file is gone from disk (FR-103) |
+| 8.13 | `GET /join/{codeA}` with no session | Branding present in the response — the join page is branded before anyone has an account (FR-073) |
+| 8.14 | As the multi-trainer player, view Trainer A's context, then switch to B | A's logo and colour, then the platform default; no flash of the wrong identity between them (SC-024) |
+| 8.15 | With a coach or player signed in, look for branding settings | Not offered; a direct `PATCH /me/branding` returns 403 (FR-093) |
+| 8.16 | Change the colour as Trainer A while a player of A is signed in elsewhere | The player sees the new colour on their next view, without signing out (FR-102, SC-022) |
+| 8.17 | Reset | Logo and colour both return to the platform default; the stored file is removed (FR-100) |
+| 8.18 | Open `/login` | Platform default branding, never a trainer's (FR-101) |
+
+**Contrast is a unit test, not an eyeball check.** `brandPalette` is pure, so
+`frontend/tests/brand-palette.test.ts` sweeps a few hundred colours — including the mid-tone band
+where neither black nor white text reaches 4.5:1 against the raw colour — and asserts every returned
+text-bearing surface clears 4.5:1. That test is SC-023.
+
+**Known limitation, worth seeing during 8.15**: a Coach signed in today sees the platform default,
+not their trainer's branding, because which trainer a coach works for is US-01.08 and does not exist
+yet. `branding_service.resolve_for_viewer` carries the branch and a `TODO(US-01.08)`. See
+[research.md](./research.md) R-33.
+
+## Cross-cutting checks — extended
+
+| Check | How | Requirement |
+|---|---|---|
+| No cross-trainer leakage | `tests/integration/test_trainer_isolation.py`, every trainer-facing route, two-trainer fixture | FR-090, SC-025 |
+| Code entropy and throttle | `tests/integration/test_join_link_throttle.py`, 10,000-code trial | FR-066, FR-071, SC-021 |
+| Contrast across the colour space | `frontend/tests/brand-palette.test.ts` | FR-099, SC-023 |
+| Registration atomicity | Force a failure after the account insert; assert nothing persisted | FR-083 |
+| SVG screening | Fixture set of hostile SVGs in `tests/unit/test_svg_screening.py` | FR-095 |
+| Permission matrix still complete | The existing matrix test gains the join, share-link, branding, context, and roster routes | SC-002 |
+| Backfill idempotence | Run `alembic upgrade head` twice; count `share_links` | data-model §23 |
+
+## Quality gates — extended
+
+No new commands. Two greps join the two already in §6:
+
+```bash
+# A trainer id arriving as a request parameter — R-25 forbids it; context is server-resolved.
+grep -rn "trainer_id" backend/src/app/api/ | grep -v "admin_users_router" | grep "Query\|Path("
+
+# A logo rendered anywhere but an <img>, which R-27's last layer depends on.
+grep -rn "branding" frontend/src --include=*.tsx | grep -E "<object|<embed|dangerouslySetInnerHTML"
+```
+
+Both should print nothing.

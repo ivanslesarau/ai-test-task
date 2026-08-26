@@ -408,3 +408,220 @@ environment, never from a committed default. Without it the platform has no way 
 account requires a Super Admin to create it. The command refuses to run if any Super Admin already
 exists, so it cannot be used to mint a second one, and it writes an `audit_entries` row attributed to
 the bootstrap process.
+
+---
+
+# Extension: ShareLink Onboarding, Multi-Trainer & Portal Branding
+
+**Date**: 2026-08-26 | **Inputs**: [spec.md](./spec.md) FR-065 – FR-104,
+[research.md](./research.md) R-21 – R-33
+
+Everything below is additive. No existing column changes type or nullability, and no existing row
+is rewritten except by the backfill in revision 7, which only inserts.
+
+## 15. New enumerations
+
+### `ShareLinkKind`
+
+| Value | Uses | Expiry | Addressed to | In scope here |
+|---|---|---|---|---|
+| `player_standing` | unlimited | none | anyone holding the link | **yes** |
+| `coach_single_use` | 1 | 7 days | one named email | no — US-01.08 |
+
+FR-072 requires the distinction to exist in the record now so the coach flow is additive later. Only
+`player_standing` rows are ever written by this feature; the second value is a constraint the schema
+already permits, not code that exists.
+
+### `AssociationStatus`
+
+| Value | Meaning |
+|---|---|
+| `active` | The player trains with this trainer. Appears in the switcher. |
+| `inactive` | Retained for history; excluded from the switcher (FR-089). Nothing in this feature sets it — US-01.04 does. |
+
+### `Gender` (R-32)
+
+`male`, `female`, `other`, `prefer_not_to_say`. Persisted as constrained text, like `UserRole`.
+
+## 16. `share_links`
+
+A trainer's standing offer to join them (FR-065 – FR-069).
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | text(36) | PK | UUIDv4. |
+| `code` | text(64) | not null, **unique**, indexed | The URL-safe code, stored **as issued** — not hashed. R-21 argues why this token is the exception. `secrets.token_urlsafe(16)`, 22 characters, 128 bits. |
+| `trainer_user_id` | text(36) | FK → `users.id`, not null, indexed | Owner (FR-067). |
+| `created_by_user_id` | text(36) | FK → `users.id`, not null | The trainer, or the Super Admin whose account-creation transaction produced it. |
+| `kind` | text | not null, check in `ShareLinkKind` | Always `player_standing` here. |
+| `target_email` | text(320) | nullable | For `coach_single_use` only; always `NULL` in this feature. |
+| `expires_at` | timestamptz | nullable | `NULL` means never (FR-065). |
+| `max_uses` | integer | nullable | `NULL` means unlimited. |
+| `use_count` | integer | not null, default 0 | Raised by exactly one per association produced (FR-068), never by a repeat visit (FR-082). |
+| `is_active` | boolean | not null, default true | Cleared on regeneration (FR-069). |
+| `revoked_at` | timestamptz | nullable | Set with `is_active = false`. |
+| `created_at` | timestamptz | not null | |
+
+**Indexes**: unique on `code` — the join path's only lookup, and it must be an index seek because it
+is reachable unauthenticated; on `(trainer_user_id, is_active)` for "my current link".
+
+A link admits a join only when `is_active`, `revoked_at IS NULL`, `expires_at` is null or future,
+`max_uses` is null or above `use_count`, **and** the owning trainer's account is `active`. All five
+are checked in one service predicate whose single refusal message satisfies FR-070's
+non-disclosure clause — the caller cannot tell which condition failed.
+
+Old rows are never deleted: `trainer_player_associations.share_link_id` references them, and FR-069
+requires associations to outlive the link that made them.
+
+## 17. `trainer_player_associations`
+
+The many-to-many at the centre of the multi-trainer requirement (FR-084 – FR-092).
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | text(36) | PK | |
+| `trainer_user_id` | text(36) | FK → `users.id`, not null, indexed | |
+| `player_user_id` | text(36) | FK → `users.id`, not null, indexed | |
+| `share_link_id` | text(36) | FK → `share_links.id`, nullable | Which link produced it (FR-068). Nullable for associations a later epic creates by another route. |
+| `status` | text | not null, check in `AssociationStatus`, default `active` | |
+| `joined_at` | timestamptz | not null | |
+| `updated_at` | timestamptz | not null | |
+
+**Unique constraint** on `(trainer_user_id, player_user_id)` — this is what makes FR-082 true rather
+than checked: a second join attempt hits the index, the service catches the integrity error and
+returns "already connected" without raising `use_count`.
+
+**Indexes**: the unique pair; `(player_user_id, status)` for the switcher; `(trainer_user_id,
+status)` for the roster.
+
+No cascade delete is relied on for erasure — erasure anonymizes rows rather than removing them
+(§10), so an erased player keeps every association and appears on each roster as "Deleted User",
+which is FR-091 and the reason SC-008's participant counts stay stable.
+
+## 18. `link_lookup_attempts`
+
+Durable counter behind FR-071 and SC-021, shaped like `sign_in_attempts` (R-30).
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | integer | PK autoincrement | High volume, never referenced. |
+| `client_ip` | text(45) | not null, indexed | The only dimension — an invalid code identifies no account. |
+| `attempted_at` | timestamptz | not null, indexed | |
+| `successful` | boolean | not null | Successful lookups recorded too, so the window clears. |
+
+**Composite index** on `(client_ip, attempted_at)`. Ten unsuccessful rows in the trailing 15 minutes
+refuse further lookups; the window slides, so access resumes on its own. Pruned by the existing
+maintenance routine.
+
+## 19. Columns added to existing tables
+
+### 19.1 `player_details` — who the player is, and where they are looking
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `player_name` | text(200) | nullable | The player's name when it differs from the account holder's (FR-074). `NULL` means "the account holder is the player" and the name is read from `user_profiles`. |
+| `date_of_birth` | date | nullable | R-31. Age is derived, never stored. |
+| `gender` | text | nullable, check in `Gender` | |
+| `is_self` | boolean | not null, default true | FR-077's answer: is the account holder the player, or responsible for one? Drives which age band applies at registration. |
+| `active_trainer_user_id` | text(36) | FK → `users.id`, nullable, indexed | R-24. The active context. Nullable because zero associations is a valid state. |
+
+`player_name` is nullable rather than duplicated from the profile so that correcting the account
+holder's name does not leave a stale copy behind for a self-registered player.
+
+`active_trainer_user_id` is **never trusted as read**. One service function resolves it, and when the
+stored trainer is missing, its association is not `active`, or its account is not `active`, the
+function selects another Active association, writes the correction back, and returns that — which is
+FR-089 implemented once rather than at each caller.
+
+### 19.2 `trainer_organizations` — the portal's identity
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `logo_key` | text(128) | nullable | Opaque storage key like `user_profiles.photo_key`, not a URL. `NULL` means the platform default (FR-104). |
+| `primary_color` | text(7) | nullable | `#rrggbb`, stored exactly as chosen (R-29). `NULL` means the default. |
+| `branding_updated_at` | timestamptz | nullable | |
+
+Both value columns are nullable and mean "default" when absent — never `''` (constitution
+Principle VI, FR-104).
+
+## 20. Erasure, extended
+
+Additions to §10's transformation table. The transaction gains these lines; nothing already in it
+changes.
+
+| Target | Before | After |
+|---|---|---|
+| `player_details.player_name` | `Sam Lee` | `NULL` — a name, and the erased account already reads as "Deleted User" |
+| `player_details.date_of_birth` | a date | `NULL` — a date of birth is identifying |
+| `player_details.gender` | a value | **unchanged** — a classification Epic-02 groups by, like `skill_level`; not an identifier on its own |
+| `player_details.is_self`, `active_trainer_user_id` | either | **unchanged** / cleared to `NULL` respectively — an erased account has no context to be in |
+| `trainer_player_associations.*` | any | **unchanged** (FR-091) — the roster keeps the row, showing "Deleted User" |
+| `share_links` owned by an erased trainer | active | `is_active = false`, `revoked_at` set — the trainer is gone, the link must not admit anyone (FR-070) |
+| `trainer_organizations.logo_key` | storage key | `NULL`, and the stored file removed — a logo identifies the business as directly as its name |
+| `trainer_organizations.primary_color` | a hex value | **unchanged** — a colour identifies nobody |
+
+The judgement recorded in §10 — that `business_name` survives — extends to `primary_color` for the
+same reason and against the same caveat: for a sole trader, the brand is the person.
+
+## 21. Relationships, extended
+
+```
+users (trainer) ──1───* share_links
+     │                      │ 0..1
+     │                      ▼
+     └──1───* trainer_player_associations *───1── users (player_parent)
+                                                        │ 1
+                                                        ▼
+                                              player_details
+                                                 active_trainer_user_id ──▶ users (trainer)
+
+users (trainer) ──1──1 trainer_organizations
+                          logo_key, primary_color
+
+link_lookup_attempts  — keyed by client_ip only, no FK to anything
+```
+
+`link_lookup_attempts` holds no foreign key for the same reason `sign_in_attempts` does not: the
+attempts worth recording are the ones that match nothing.
+
+## 22. Validation rules, extended
+
+| Field | Rule | Source |
+|---|---|---|
+| ShareLink `code` | 22 URL-safe characters from 128 bits; unique; never displayed for a link that is not the trainer's own | FR-066, R-21 |
+| `player_name` | 1–200 characters after trimming when present; `null` when the account holder is the player | FR-074, Constitution VI |
+| `date_of_birth` | A real past date; derived age must be ≥18 when `is_self`, and 1–18 when not | FR-077, R-31 |
+| `gender` | One of the four enum values | R-32 |
+| Join by an existing association | Refused as "already connected"; `use_count` unchanged | FR-082 |
+| Join by a non-`player_parent` role | Refused; nothing written | FR-081 |
+| Registration email | Same rule as account creation, including the `deleted_*@example.com` refusal | FR-076, FR-004 |
+| `PUT /me/trainer-context` body | The named trainer must have an `active` association with the caller; otherwise 404, not 403 — a trainer the caller is not associated with must not be confirmed to exist | FR-088, FR-090 |
+| Logo upload | Decodes as PNG or JPEG **or** passes SVG screening (R-27); ≤2 MB; declared content type matches | FR-094, FR-095 |
+| Logo dimensions | Raster logos above 200×200 are fitted to it preserving aspect ratio, never refused. Vector logos are not resized — they scale | FR-096 |
+| `primary_color` | Matches `^#[0-9a-fA-F]{6}$`; stored lowercased | FR-098 |
+| Any new nullable text field | Empty string rejected (`min_length=1`); absence is `null`; an explicit `null` clears, an omitted key does not | Constitution VI, FR-104 |
+
+## 23. Alembic revisions 5–7
+
+| # | Revision | Contents |
+|---|---|---|
+| 5 | `create_share_links_and_associations` | `share_links`, `trainer_player_associations`, `link_lookup_attempts`, with their check constraints and indexes |
+| 6 | `extend_player_details_and_branding` | The five `player_details` columns and the three `trainer_organizations` columns, all nullable or defaulted so the migration needs no table rewrite |
+| 7 | `backfill_trainer_share_links` | One `player_standing` link for every existing `trainer` account that has none |
+
+Revision 7 is a **data** migration and is written with SQLAlchemy Core constructs against
+`op.get_bind()` — a `select` for trainers without a link, an `insert` for the rows. No raw SQL, so it
+adds no exception to the two in `plan.md` §Complexity Tracking. It is idempotent: re-running selects
+nothing. Codes are generated in Python during the migration, so the entropy requirement holds for
+backfilled links exactly as for new ones.
+
+Revision 6 adds `is_self` with a server default of `true` so existing player rows are valid without a
+rewrite; the default stays, because a registration always states it explicitly and a row created any
+other way is a self-player by definition.
+
+## 24. Seed data, extended
+
+The bootstrap Super Admin command is unchanged. For local work and for the quickstart's US6 walk,
+the seed path additionally creates one trainer whose standing link is printed to the console, since
+a join link is otherwise only obtainable by signing in as a trainer and reading it — which is
+exactly the loop the quickstart needs to break to test registration from a cold start.

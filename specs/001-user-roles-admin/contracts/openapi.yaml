@@ -1,11 +1,16 @@
 openapi: 3.1.0
 info:
   title: PracticePerfect — User Roles, Authorization & Super Admin User Management
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Contract for feature 001-user-roles-admin. Covers sign-in and session handling,
     invitation-driven first password setup, self-service profile editing for all four roles,
     and the Super Admin user directory with create, deactivate, reactivate, and erase.
+
+    Version 1.1.0 adds the 2026-08-26 extension: the ShareLink invitation system players join
+    through, the multi-trainer association and server-resolved trainer context it requires, and
+    trainer portal branding. Those operations are grouped in the `join`, `trainer`, and `media`
+    tags and under `/me/share-link`, `/me/trainers`, `/me/trainer-context`, and `/me/branding`.
 
     Authentication is a session cookie (see securitySchemes). Every response body is a
     Pydantic V2 model; no endpoint ever returns a database error, driver message, or stack
@@ -25,7 +30,11 @@ tags:
   - name: admin-users
     description: Super Admin user directory and lifecycle actions
   - name: media
-    description: Authenticated delivery of stored profile photos
+    description: Delivery of stored profile photos (authenticated) and portal logos (public)
+  - name: join
+    description: Public invitation-link preview, registration, and association
+  - name: trainer
+    description: A trainer's own organization — currently their player roster
 
 security:
   - sessionCookie: []
@@ -616,6 +625,418 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  # ---------------------------------------------------------------------------
+  # Extension (2026-08-26): ShareLink onboarding, multi-trainer context, branding
+  # ---------------------------------------------------------------------------
+
+  /join/{code}:
+    parameters:
+      - $ref: '#/components/parameters/ShareLinkCode'
+    get:
+      tags: [join]
+      summary: Preview the trainer behind an invitation link
+      operationId: previewJoinLink
+      security: []
+      x-requirements: [FR-070, FR-071, FR-073]
+      description: |
+        Public and unauthenticated — this is the first thing a flyer's reader reaches. Returns
+        only what the join page must show: the trainer's business name and branding.
+
+        Every refusal reason — unknown code, revoked, expired, exhausted, trainer not Active —
+        returns the same 404 with the same message and no trainer detail, so the endpoint
+        cannot be used to enumerate codes or confirm a trainer exists (FR-070).
+
+        Throttled per origin: 10 unsuccessful lookups in 15 minutes and further lookups are
+        refused, sliding (FR-071, R-30).
+      responses:
+        '200':
+          description: The link is usable. Render the join page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JoinLinkPreview' }
+        '404':
+          description: The link is not valid. One message for every cause (FR-070).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: invitation_link_invalid
+                  message: This link is no longer valid.
+        '429': { $ref: '#/components/responses/LookupThrottled' }
+
+  /join/{code}/register:
+    parameters:
+      - $ref: '#/components/parameters/ShareLinkCode'
+    post:
+      tags: [join]
+      summary: Register a new player account and join the trainer
+      operationId: registerThroughJoinLink
+      security: []
+      x-requirements: [FR-074, FR-075, FR-076, FR-077, FR-078, FR-079, FR-083]
+      description: |
+        Creates the account, its profile, its player detail and parent contact rows, the
+        association with the link's trainer, and a session — in **one** transaction. A failure
+        at any point leaves nothing behind (FR-083, R-23).
+
+        On success the response sets the session cookie, so the person is signed in without a
+        second step (FR-078), and `active_trainer_id` is the link's trainer.
+
+        `date_of_birth` rather than an age: the age FR-077 constrains is derived from it, so
+        the stored value does not decay (R-31). When `is_self` is true the derived age must be
+        18 or above; when false it must be between 1 and 18.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JoinRegistrationRequest' }
+      responses:
+        '201':
+          description: Account created, joined, and signed in. Sets the session cookie.
+          headers:
+            Set-Cookie:
+              description: Session cookie, as on sign-in (FR-011).
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JoinResult' }
+        '404':
+          description: The link is not valid (FR-070).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: The email already belongs to an account in any status (FR-076).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: email_already_registered
+                  message: An account with this email already exists. Sign in, then open the link again.
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/LookupThrottled' }
+
+  /join/{code}/accept:
+    parameters:
+      - $ref: '#/components/parameters/ShareLinkCode'
+    post:
+      tags: [join]
+      summary: Join the trainer as an already signed-in player
+      operationId: acceptJoinLink
+      x-requirements: [FR-080, FR-081, FR-082, FR-084, FR-085]
+      description: |
+        No body and no detail to supply: the account already exists (FR-080). Creates the
+        association and switches the caller's active context to the new trainer.
+
+        Repeating the call for a trainer already joined returns 200 with
+        `already_associated: true`, creates nothing, and does **not** raise the link's use
+        count (FR-082).
+
+        A caller whose role is not `player_parent` is refused and nothing is written (FR-081).
+      responses:
+        '200':
+          description: Associated, or already associated. The active context is the link's trainer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JoinResult' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403':
+          description: The caller's role cannot join through a player link (FR-081).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: role_cannot_join
+                  message: This link is for players and parents.
+        '404':
+          description: The link is not valid (FR-070).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/LookupThrottled' }
+
+  /me/share-link:
+    get:
+      tags: [me]
+      summary: Read this trainer's standing player invitation link
+      operationId: getOwnShareLink
+      x-requirements: [FR-065, FR-067, FR-069]
+      description: |
+        Trainer only. A pure read — the link was created with the account (R-22), so this
+        endpoint never writes. `url` is absolute and ready to copy onto a flyer; `code` is
+        given separately for clients that build their own display.
+      responses:
+        '200':
+          description: The trainer's current standing link, with its usage counters.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareLink' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /me/share-link/regenerate:
+    post:
+      tags: [me]
+      summary: Replace this trainer's invitation link with a fresh one
+      operationId: regenerateOwnShareLink
+      x-requirements: [FR-069]
+      description: |
+        Revokes the current code and issues a new one in the same transaction. The old code
+        stops admitting anyone immediately (SC-020); every association it already produced is
+        untouched, which is why the old row is retained rather than deleted.
+      responses:
+        '201':
+          description: The new link. The previous code is dead from this moment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareLink' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /me/trainers:
+    get:
+      tags: [me]
+      summary: List the trainers this player trains with
+      operationId: listOwnTrainers
+      x-requirements: [FR-084, FR-088, FR-089]
+      description: |
+        Player/Parent only. Backs the context switcher. Returns only Active associations whose
+        trainer account is Active (FR-089); an entry is therefore always switchable. When the
+        list holds one entry the interface shows no switcher (FR-088); when it is empty the
+        person belongs to no trainer, which is a valid state.
+      responses:
+        '200':
+          description: The caller's trainers, and which one is active.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrainerContextList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /me/trainer-context:
+    put:
+      tags: [me]
+      summary: Switch which trainer this player is looking at
+      operationId: switchTrainerContext
+      x-requirements: [FR-086, FR-087, FR-088, FR-090]
+      description: |
+        The only way context changes. No other endpoint accepts a trainer identifier, because
+        context is a data-isolation boundary rather than a view preference (R-25).
+
+        A trainer the caller holds no Active association with returns **404, not 403** — a
+        refusal that distinguished "not yours" from "does not exist" would confirm the
+        existence of trainers the caller cannot see (FR-090).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TrainerContextRequest' }
+      responses:
+        '200':
+          description: |
+            The new active context. The client discards every cached context-scoped response
+            before rendering (R-26).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrainerContextList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No Active association with that trainer, or no such trainer (FR-090).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /me/branding:
+    get:
+      tags: [me]
+      summary: Read this trainer's portal branding
+      operationId: getOwnBranding
+      x-requirements: [FR-093, FR-104]
+      description: Trainer only. Absent values mean the platform default, never an empty string.
+      responses:
+        '200':
+          description: The trainer's stored branding.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PortalBranding' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    patch:
+      tags: [me]
+      summary: Set or clear the primary brand colour
+      operationId: updateOwnBranding
+      x-requirements: [FR-093, FR-098, FR-102, FR-104]
+      description: |
+        An omitted key leaves the colour unchanged; an explicit `null` clears it back to the
+        platform default (constitution Principle VI). The colour is stored exactly as chosen —
+        the readable palette is derived at render time, so no derived value is persisted (R-29).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PortalBrandingUpdate' }
+      responses:
+        '200':
+          description: The stored branding after the change.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PortalBranding' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /me/branding/logo:
+    put:
+      tags: [me]
+      summary: Upload this trainer's portal logo
+      operationId: uploadOwnLogo
+      x-requirements: [FR-094, FR-095, FR-096, FR-103]
+      description: |
+        Trainer only. PNG, JPEG, or SVG, at most 2 MB.
+
+        Raster uploads are decode-validated and, above 200×200, fitted to it preserving aspect
+        ratio rather than refused (FR-096). SVG uploads are screened before storage — DOCTYPE
+        refused, then scripts, `foreignObject`, `on*` attributes, and non-fragment references
+        rejected (FR-095, R-27) — and are not resized, because they scale.
+
+        Replacing a logo removes the previous file (FR-103).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '200':
+          description: The stored branding, with the new logo URL.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PortalBranding' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413':
+          description: Over 2 MB (FR-094).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: |
+            Not a PNG, JPEG, or SVG; declared type does not match the decoded content; or the
+            SVG failed screening (FR-094, FR-095).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+    delete:
+      tags: [me]
+      summary: Remove this trainer's portal logo
+      operationId: deleteOwnLogo
+      x-requirements: [FR-100, FR-103]
+      responses:
+        '204':
+          description: Logo cleared and its file removed. The platform default renders.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /me/branding/reset:
+    post:
+      tags: [me]
+      summary: Reset branding to the platform default
+      operationId: resetOwnBranding
+      x-requirements: [FR-100, FR-103]
+      description: Clears logo and colour together and removes the stored logo file.
+      responses:
+        '200':
+          description: Branding after the reset — every value absent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PortalBranding' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /media/branding/{key}:
+    parameters:
+      - name: key
+        in: path
+        required: true
+        schema: { type: string, maxLength: 128 }
+    get:
+      tags: [media]
+      summary: Fetch a stored portal logo
+      operationId: getBrandingLogo
+      security: []
+      x-requirements: [FR-073, FR-095, FR-101]
+      description: |
+        **Unauthenticated**, unlike `/media/photos/{key}`, because FR-073 requires the join
+        page to show a trainer's branding before anyone has an account. A logo is published
+        material; a profile photo is not.
+
+        SVG responses carry `X-Content-Type-Options: nosniff` and
+        `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'`. Clients must
+        render logos through `<img>` only — never `<object>`, `<embed>`, or inline (R-27).
+      responses:
+        '200':
+          description: The image.
+          headers:
+            Cache-Control:
+              schema: { type: string, example: 'public, max-age=300' }
+            X-Content-Type-Options:
+              schema: { type: string, enum: [nosniff] }
+            Content-Security-Policy:
+              description: Sent for SVG responses.
+              schema: { type: string }
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/svg+xml:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /trainer/players:
+    get:
+      tags: [trainer]
+      summary: List the players associated with this trainer
+      operationId: listTrainerPlayers
+      x-requirements: [FR-090, FR-091, SC-025]
+      description: |
+        Trainer only, and scoped to the caller's own associations — there is no parameter that
+        could widen it.
+
+        Nothing in the response says whether a player also trains with another trainer: no
+        other-trainer identifier, no count of trainers, no join date from elsewhere (FR-090,
+        SC-025).
+
+        An erased player appears here as "Deleted User" with the association intact, which is
+        what keeps participant counts stable (FR-091, SC-008).
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - name: q
+          in: query
+          description: Case-insensitive partial match on the player's name.
+          schema: { type: string, maxLength: 200 }
+      responses:
+        '200':
+          description: One page of this trainer's roster.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrainerPlayerPage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
 components:
   securitySchemes:
     sessionCookie:
@@ -633,6 +1054,12 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    ShareLinkCode:
+      name: code
+      in: path
+      required: true
+      description: The invitation link's code, exactly as issued (R-21).
+      schema: { type: string, minLength: 8, maxLength: 64 }
 
   responses:
     Unauthenticated:
@@ -682,6 +1109,22 @@ components:
             error:
               code: too_many_attempts
               message: Too many attempts. Try again in a few minutes.
+    LookupThrottled:
+      description: |
+        Too many unsuccessful invitation-code lookups from this origin. Retry after the stated
+        interval; access resumes automatically (FR-071, SC-021, R-30).
+      headers:
+        Retry-After:
+          description: Seconds until lookups are accepted again.
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: too_many_attempts
+              message: Too many attempts. Try again in a few minutes.
+
     StatusConflict:
       description: |
         The account changed since it was read. The caller's `version` did not match. Re-read
@@ -774,6 +1217,25 @@ components:
             API-relative path, resolved against this document's server base path. A client
             rendering it in a DOM `src` MUST prefix its own API base URL. Null when no photo is
             stored; the interface shows the default avatar.
+        active_trainer_id:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            Player/Parent only, and null for every other role and for a player who belongs to
+            no trainer. The context every player-facing read is scoped to. Changed only through
+            `PUT /me/trainer-context` — no other endpoint accepts a trainer identifier (R-25).
+        trainer_count:
+          type: integer
+          default: 0
+          description: |
+            How many switchable trainers the caller has. The interface shows the switcher only
+            above one (FR-088). Zero for every non-player role.
+        portal_branding:
+          $ref: '#/components/schemas/PortalBranding'
+          description: |
+            The branding to paint for this viewer, resolved server-side: a trainer's own, a
+            player's active context's, the platform default otherwise (FR-101). Coaches receive
+            the default until US-01.08 establishes which trainer they work for (research R-33).
 
     PhotoUrls:
       type: object
@@ -1049,3 +1511,228 @@ components:
             display_name: { type: string }
         reason: { type: string }
         erased_at: { type: string, format: date-time }
+
+    # -------------------------------------------------------------------------
+    # Extension (2026-08-26): ShareLink onboarding, multi-trainer, branding
+    # -------------------------------------------------------------------------
+
+    Gender:
+      type: string
+      enum: [male, female, other, prefer_not_to_say]
+      description: Closed set so later epics can group and filter by it (R-32).
+
+    ShareLinkKind:
+      type: string
+      enum: [player_standing, coach_single_use]
+      description: |
+        Only `player_standing` is issued by this feature. `coach_single_use` exists in the
+        contract so US-01.08 is additive rather than a restructuring (FR-072).
+
+    PortalBranding:
+      type: object
+      additionalProperties: false
+      required: [logo_url, primary_color, updated_at]
+      description: |
+        One trainer's portal identity. Every value may be absent, and absent means the platform
+        default — never an empty string (FR-104, constitution Principle VI).
+      properties:
+        logo_url:
+          type: [string, 'null']
+          description: |
+            API-relative path under `/media/branding/`. A DOM `src` must prefix the API base
+            URL, as with photo URLs. Render through `<img>` only (R-27).
+        primary_color:
+          type: [string, 'null']
+          pattern: '^#[0-9a-f]{6}$'
+          description: |
+            Exactly the colour the trainer chose (R-29). The readable palette is derived by the
+            client; no derived value is stored or transmitted.
+        updated_at: { type: [string, 'null'], format: date-time }
+
+    PortalBrandingUpdate:
+      type: object
+      additionalProperties: false
+      description: |
+        An omitted key changes nothing; an explicit `null` clears the value to the platform
+        default. Empty string is rejected (constitution Principle VI).
+      properties:
+        primary_color:
+          type: [string, 'null']
+          pattern: '^#[0-9a-fA-F]{6}$'
+
+    ShareLink:
+      type: object
+      additionalProperties: false
+      required: [id, code, url, kind, is_active, use_count, expires_at, max_uses, created_at]
+      description: A trainer's standing player invitation link (FR-065 – FR-069).
+      properties:
+        id: { type: string, format: uuid }
+        code:
+          type: string
+          minLength: 22
+          maxLength: 64
+          description: |
+            The code as issued. Stored in clear rather than hashed, because FR-069 requires the
+            trainer to read it back at any time; R-21 argues why that is safe for this token and
+            for no other in the system.
+        url:
+          type: string
+          format: uri
+          description: The absolute link, ready to copy — assembled from the configured public base URL.
+        kind: { $ref: '#/components/schemas/ShareLinkKind' }
+        is_active: { type: boolean }
+        use_count:
+          type: integer
+          description: Raised by exactly one per association produced; a repeat visit raises it by zero (FR-068, FR-082).
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+          description: Always null for a standing player link (FR-065).
+        max_uses:
+          type: [integer, 'null']
+          description: Always null for a standing player link.
+        created_at: { type: string, format: date-time }
+
+    JoinLinkPreview:
+      type: object
+      additionalProperties: false
+      required: [trainer_display_name, branding, viewer]
+      description: |
+        The only thing an unauthenticated caller ever learns about a trainer. No identifier, no
+        contact detail, no roster size (FR-073).
+      properties:
+        trainer_display_name:
+          type: string
+          description: The organization's business name.
+        branding: { $ref: '#/components/schemas/PortalBranding' }
+        viewer:
+          type: object
+          additionalProperties: false
+          required: [state]
+          description: What the join page should offer, decided server-side.
+          properties:
+            state:
+              type: string
+              enum: [anonymous, can_join, already_associated, role_cannot_join]
+              description: |
+                `anonymous` → show the registration form. `can_join` → show one confirm button
+                (FR-080). `already_associated` → say so and offer the trainer's area (FR-082).
+                `role_cannot_join` → explain the link is for players and parents (FR-081).
+
+    JoinRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required: [first_name, last_name, email, password, phone, is_self, gender, date_of_birth]
+      description: |
+        One account, one player. Child profiles are out of scope, so there is no list of family
+        members here; the field that keeps that door open is `is_self`.
+      properties:
+        first_name: { type: string, minLength: 1, maxLength: 100 }
+        last_name: { type: string, minLength: 1, maxLength: 100 }
+        email: { type: string, format: email, maxLength: 320 }
+        password: { $ref: '#/components/schemas/Password' }
+        phone:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: Parseable to E.164, stored normalized — the same rule as every other write path.
+        is_self:
+          type: boolean
+          description: |
+            True when the account holder is the player; false when they are registering someone
+            they are responsible for. Selects which age band applies (FR-077).
+        player_name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 200
+          description: |
+            Required when `is_self` is false. Null when the account holder is the player — the
+            name is then read from the profile rather than copied (FR-074).
+        date_of_birth:
+          type: string
+          format: date
+          description: |
+            The age FR-077 constrains is derived from this: 18 or above when `is_self`, between
+            1 and 18 when not. Stored as a date so it does not decay (R-31).
+        gender: { $ref: '#/components/schemas/Gender' }
+
+    TrainerContextEntry:
+      type: object
+      additionalProperties: false
+      required: [trainer_id, display_name, branding, joined_at]
+      properties:
+        trainer_id: { type: string, format: uuid }
+        display_name: { type: string }
+        branding: { $ref: '#/components/schemas/PortalBranding' }
+        joined_at: { type: string, format: date-time }
+
+    TrainerContextList:
+      type: object
+      additionalProperties: false
+      required: [active_trainer_id, trainers]
+      description: |
+        The switcher's whole state. `trainers` holds only Active associations with Active
+        trainers, so every entry is switchable (FR-089). One entry means no switcher is shown
+        (FR-088); an empty list means the person belongs to no trainer, which is valid.
+      properties:
+        active_trainer_id:
+          type: [string, 'null']
+          format: uuid
+          description: Null only when `trainers` is empty.
+        trainers:
+          type: array
+          items: { $ref: '#/components/schemas/TrainerContextEntry' }
+
+    TrainerContextRequest:
+      type: object
+      additionalProperties: false
+      required: [trainer_id]
+      properties:
+        trainer_id: { type: string, format: uuid }
+
+    JoinResult:
+      type: object
+      additionalProperties: false
+      required: [trainer_id, trainer_display_name, already_associated, active_trainer_id]
+      properties:
+        trainer_id: { type: string, format: uuid }
+        trainer_display_name: { type: string }
+        already_associated:
+          type: boolean
+          description: True when the caller was already connected. Nothing was written and the use count did not move (FR-082).
+        active_trainer_id:
+          type: string
+          format: uuid
+          description: The context the caller is now in — the link's trainer.
+
+    TrainerPlayerSummary:
+      type: object
+      additionalProperties: false
+      required: [player_user_id, display_name, is_self, joined_at, photo_url]
+      description: |
+        One row of a trainer's roster. Deliberately carries nothing about the player's other
+        trainers — not an identifier, not a count (FR-090, SC-025).
+      properties:
+        player_user_id: { type: string, format: uuid }
+        display_name:
+          type: string
+          description: The player's name, or "Deleted User" for an erased account (FR-091).
+        is_self: { type: boolean }
+        age:
+          type: [integer, 'null']
+          description: Derived from the stored date of birth; null once erased (R-31).
+        gender: { type: [string, 'null'] }
+        joined_at: { type: string, format: date-time }
+        photo_url: { type: [string, 'null'] }
+
+    TrainerPlayerPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, page_size, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TrainerPlayerSummary' }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }

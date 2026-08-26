@@ -1,6 +1,6 @@
-# Implementation Plan: User Roles, Authorization & Super Admin User Management
+# Implementation Plan: User Roles, Super Admin Management, ShareLink Onboarding & Portal Branding
 
-**Branch**: `001-user-roles-admin` | **Date**: 2026-08-19 | **Spec**: [spec.md](./spec.md)
+**Branch**: `001-user-roles-admin` | **Date**: 2026-08-19, extended 2026-08-26 | **Spec**: [spec.md](./spec.md)
 
 **Input**: Feature specification from `/specs/001-user-roles-admin/spec.md`
 
@@ -22,6 +22,12 @@ history and reporting totals survive an erasure untouched. Both are argued in
 Delivery follows the spec's story priorities, each slice independently demonstrable: sign-in and
 permissions (P1), account creation and invitation (P1), profile self-service (P2), deactivation (P2),
 erasure (P3).
+
+**The 2026-08-26 extension** adds three further slices — joining a trainer through a ShareLink (P1),
+multi-trainer association with server-resolved context (P2), and trainer portal branding (P3). Its
+Technical Context, Constitution Check, structure, sequence, and recorded judgements are in
+[§Extension](#extension-2026-08-26-sharelink-onboarding-multi-trainer--portal-branding) at the end of
+this document; everything above it describes the already-implemented foundation and is unchanged.
 
 ## Technical Context
 
@@ -76,8 +82,10 @@ this feature's write volume and stated plainly rather than hidden. No `any` anyw
 No raw SQL except the two documented exceptions below. Sessions must be revocable within one minute
 (SC-007), which the design satisfies synchronously.
 
-**Scale/Scope**: 10,000 accounts as the directory performance target; four roles; 19 API operations;
-9 database tables; 5 frontend routes plus two layout routes; 56 functional requirements.
+**Scale/Scope** (foundation, as built): 10,000 accounts as the directory performance target; four
+roles; 19 API operations; 9 database tables; 5 frontend routes plus two layout routes; 56 functional
+requirements. After the 2026-08-26 extension: 33 API operations, 12 database tables, nine routes plus
+three layout routes, 104 functional requirements — see §Extension.
 
 ## Constitution Check
 
@@ -109,11 +117,11 @@ recorded below rather than waived.
 specs/001-user-roles-admin/
 ├── plan.md                          # This file
 ├── spec.md                          # Approved specification
-├── research.md                      # Phase 0 — 20 decisions, both clarifications resolved
-├── data-model.md                    # Phase 1 — 9 tables, transitions, erasure mapping
+├── research.md                      # Phase 0 — 33 decisions, both clarifications resolved
+├── data-model.md                    # Phase 1 — 12 tables, transitions, erasure mapping
 ├── quickstart.md                    # Phase 1 — setup and story-by-story validation
 ├── contracts/
-│   ├── openapi.yaml                 # Phase 1 — 19 operations, 24 schemas
+│   ├── openapi.yaml                 # Phase 1 — 33 operations, 37 schemas
 │   └── frontend-contracts.md        # Phase 1 — routes, query keys, state ownership
 ├── checklists/
 │   └── requirements.md              # Spec quality checklist — all items pass
@@ -362,3 +370,173 @@ an unreachable relay could hang an in-request send indefinitely; and the hard-co
 exactly what this plan's configuration rule forbids. On the client, the re-invite action stops
 reporting success unconditionally and honours `invitation_sent`, which is what FR-064 requires and
 what makes FR-028's recovery loop actually reachable.
+
+---
+
+## Extension (2026-08-26): ShareLink Onboarding, Multi-Trainer & Portal Branding
+
+**Spec basis**: User Stories 6–8, FR-065 – FR-104, SC-015 – SC-025.
+**Phase 0**: [research.md](./research.md) Part C, R-21 – R-33.
+**Phase 1**: [data-model.md](./data-model.md) §15–§24,
+[contracts/openapi.yaml](./contracts/openapi.yaml) v1.1.0,
+[contracts/frontend-contracts.md](./contracts/frontend-contracts.md) §8–§14,
+[quickstart.md](./quickstart.md) US6–US8.
+
+### Summary of the extension
+
+Players stop being hand-created. Every trainer holds one standing invitation link they can print or
+post; anyone who opens it sees a branded join page and registers into that trainer's roster in a
+single transaction. A player who opens a second trainer's link joins it with the same account, and
+from then on lives in one trainer context at a time — a boundary the server resolves and enforces
+rather than the client selecting. Trainers put their own logo and colour on the portal their players
+and coaches see.
+
+Four decisions carry most of the weight, and each is argued in `research.md`:
+
+- **The ShareLink code is stored in clear** (R-21), alone among this system's tokens. FR-069 requires
+  the trainer to read it back at any time, which a hash forbids, and the link is meant to be
+  published. 128 bits of entropy plus a per-origin throttle is what keeps FR-066 true.
+- **Context is resolved server-side from the player's own row** (R-24, R-25). No endpoint takes a
+  `trainer_id`. Epics 02–08 will add dozens of context-scoped endpoints; if context arrived as a
+  parameter, each would have to remember to validate it, and one omission is a cross-tenant read.
+- **Context-scoped query keys are namespaced `['ctx', trainerId, …]`** (R-26). Fixing this convention
+  now, while the namespace holds one entry, is what stops User Story 7's isolation rule from being
+  retrofitted across eight epics later.
+- **SVG logos are handled without a new dependency** (R-27): refuse a DOCTYPE, screen with the
+  standard library, serve inertly, render only through `<img>`. The constitution forbids adding a
+  sanitizer library, and this is the layered answer that does not need one.
+
+### Technical Context — what changed
+
+**Dependencies**: **none added.** This is worth stating rather than assuming: the two places that
+would normally pull one in are SVG sanitization (R-27, answered with `xml.etree` plus a DOCTYPE
+refusal and inert serving) and colour-contrast maths (R-29, a dozen lines of arithmetic in
+`shared/lib/brand-palette.ts`). Pillow already handles the raster logo path, and `secrets` already
+generates the codes. The locked stack is untouched, so no constitution amendment is required.
+
+**Storage**: three new tables — `share_links`, `trainer_player_associations`,
+`link_lookup_attempts` — and eight new columns on two existing tables. Portal logos join profile
+photos behind the same storage port, with one difference: logos are served **unauthenticated**,
+because FR-073 puts branding on a page reached before anyone has an account.
+
+**Performance goals**: joining an additional trainer within 5 s (SC-016); a context switch within
+2 s (SC-018); a revoked link dead within 1 minute (SC-020, immediate by construction — the check is
+a column read in the same predicate); a branding change visible within 1 minute without signing out
+(SC-022, achieved by the session query's refetch rather than by any push mechanism).
+
+**Constraints**: unchanged, plus one new class of test that must not be treated as optional — the
+cross-trainer isolation sweep (SC-025). A permission matrix proves roles cannot reach each other's
+actions; it does not prove that one trainer's data never appears in another's response body. Those
+are different failures and need different tests.
+
+**Scale/Scope**: 33 API operations (19 + 14); 12 database tables (9 + 3); nine frontend routes plus
+three layout routes; 104 functional requirements.
+
+### Constitution Check — re-evaluated for the extension
+
+Evaluated against `.specify/memory/constitution.md` v1.1.0.
+
+| Principle | Verdict | How the extension satisfies it |
+|---|:---:|---|
+| I. Spec-Driven Development | PASS | `spec.md` was extended and validated before this plan; these artifacts contain no functional code. Notably, the coach half of FR-101 is **not** implemented ahead of US-01.08 — see R-33 and the recorded judgement below. |
+| II. End-to-End Type Safety | PASS | `ShareLinkKind`, `AssociationStatus`, and `Gender` are closed enums, not free text (data-model §15), so the join page's four-way `viewer.state` branch is exhaustive at compile time. New request and response models are Pydantic V2; their Zod mirrors are tabulated in `frontend-contracts.md` §10. |
+| III. Layered Backend Architecture | PASS | Four new services — `join_service`, `share_link_service`, `trainer_context_service`, `branding_service` — over three new repositories. Trainer context is resolved in a `Depends` (`get_trainer_context`), the same shape R-14 gives the role gate, so no router and no repository decides it. |
+| IV. Feature-Sliced Frontend | PASS | New slices assigned in `frontend-contracts.md` §8–§13. The judgement call is §11: the active trainer context **looks** like UI state and is not — it is server state owned by TanStack Query, because the server corrects it (FR-089) and it persists across devices (FR-086). The Zustand store gains exactly one field, and it is whether a dropdown is open. |
+| V. Async-First & Contained Failures | PASS | No new raw SQL: revision 7's backfill is written with Core constructs against `op.get_bind()`, so the two documented exceptions stay at two. FR-070's single refusal message for five distinct causes is contained-failure behaviour applied to an unauthenticated surface. |
+| VI. Null-Not-Empty Data Contract | PASS | Every new nullable field is `str \| None` with `min_length=1`; `PortalBrandingUpdate` distinguishes an omitted key from an explicit `null` through `model_dump(exclude_unset=True)`, which is how FR-100's reset and FR-104's "absent means default" coexist. The join form routes through the single `normalizeEmptyToNull` helper D-01 established — no second normalizer. |
+| Stack constraints | PASS | **Zero dependencies added**, as above. Branding colours reach components as CSS custom properties overriding `DESIGN_TOKENS.md` defaults, so no component holds a hex literal and the design-token rule survives runtime theming. Three new Alembic revisions. |
+| Workflow & quality gates | PASS | `quickstart.md` gains the isolation sweep, the throttle trial, the contrast sweep, the SVG fixture set, and two greps; the existing permission matrix gains every new route. |
+
+**Gate result: PASS.** No new violations, no new exceptions, no amendment needed.
+
+### Project Structure — files the extension adds
+
+```text
+backend/src/app/
+├── models/
+│   ├── share_link.py                 # share_links
+│   └── association.py                # trainer_player_associations, link_lookup_attempts
+├── schemas/
+│   ├── join.py                       # preview, registration, result
+│   ├── share_link.py
+│   ├── trainer_context.py
+│   └── branding.py
+├── repositories/
+│   ├── share_link_repository.py
+│   ├── association_repository.py
+│   └── link_lookup_attempt_repository.py
+├── services/
+│   ├── join_service.py               # the one transaction of R-23
+│   ├── share_link_service.py         # issue, read, regenerate, the five-part usability predicate
+│   ├── trainer_context_service.py    # resolve-and-repair (R-24), switch, list
+│   ├── branding_service.py           # resolve_for_viewer, logo lifecycle
+│   └── svg_screening.py              # R-27 layer 1 — stdlib only
+├── core/deps.py                      # + get_trainer_context
+└── api/v1/
+    ├── join_router.py                # public
+    ├── trainer_router.py             # roster
+    ├── me_router.py                  # + share-link, trainers, trainer-context, branding
+    └── media_router.py               # + public /media/branding/{key}
+
+backend/migrations/versions/
+├── 0005_create_share_links_and_associations.py
+├── 0006_extend_player_details_and_branding.py
+└── 0007_backfill_trainer_share_links.py        # Core constructs, idempotent
+
+frontend/src/
+├── routes/
+│   ├── join.$code.tsx                # public — beside login.tsx, NOT under _authed
+│   └── _authed/trainer/{portal,players}.tsx  (+ trainer.tsx layout route)
+├── pages/{join,trainer-portal,trainer-players}/
+├── widgets/
+│   ├── branding-provider/            # session branding → CSS custom properties
+│   ├── trainer-context-switcher/
+│   └── app-shell/                    # + switcher slot
+├── features/
+│   ├── join/{register,accept}/
+│   └── trainer/{share-link,branding}/
+├── entities/
+│   ├── join/                         # preview query
+│   └── trainer-context/              # ctxKeys namespace, switch mutation, roster query
+└── shared/lib/brand-palette.ts       # pure: primary hex → readable palette (R-29)
+```
+
+`routes/join.$code.tsx` sits at the top level deliberately: `_authed` redirects to `/login` when
+there is no session, which is exactly the visitor the join page exists to serve.
+
+### Implementation Sequence — phases 7 to 10
+
+| Phase | Delivers | Backend | Frontend | Proves |
+|---|---|---|---|---|
+| 7 | **US6** — joining through a link | Revisions 5–7; share-link issue/read/regenerate; the join transaction; the throttle; the roster | Public join page with its four-way branch; trainer portal page's link half; roster table | SC-015, SC-019, SC-020, SC-021 |
+| 8 | **US7** — multi-trainer and context | `accept`; context resolve-and-repair; `PUT /me/trainer-context`; the `ctx` dependency; isolation sweep | Context switcher; `ctx` key namespace; switch-and-drop-cache | SC-016, SC-017, SC-018, SC-025 |
+| 9 | **US8** — portal branding | Branding read/update/reset; logo upload with raster fitting and SVG screening; public logo delivery | Branding controls with preview; `brand-palette.ts`; branding provider on both mount points | SC-022, SC-023, SC-024 |
+| 10 | Hardening | Permission matrix extended to every new route; throttle trial; backfill idempotence | Contrast sweep; empty-state coverage for a player with no trainer | Full suite green |
+
+Phase 7 carries all three migrations for the same reason phase 1 carried four: they are one schema
+change, and splitting them across phases would create revisions that exist only to be superseded.
+
+The roster (`GET /trainer/players`) lands in phase 7 rather than phase 8, even though it is a
+trainer-scoped view, because US6's Independent Test is "the trainer sees the new player on their
+roster" — without it, phase 7 cannot be demonstrated.
+
+### Complexity Tracking — extension
+
+**No new deviations from the constitution.** The two raw-SQL exceptions stand at two; revision 7's
+backfill is Core constructs, and no new dependency was added. What follows are three judgements a
+reviewer should see stated rather than discover, in the same spirit as the erasure judgement above.
+
+| Judgement | What it is | Why, and what would change it |
+|---|---|---|
+| **ShareLink codes are stored in clear** | Every other secret here — session tokens, setup invitations — is stored as a SHA-256. This one is not. | FR-069 requires the trainer to read the link back at any time, which a hash makes impossible, and the link is designed to be published on a flyer. What it grants is one thing the trainer is already offering publicly. If the coach single-use variety (US-01.08) is added, **it should be hashed** — it is addressed to one person and shown once, so the reasoning inverts. R-21. |
+| **`/media/branding/{key}` is unauthenticated** | Profile photos require a session; logos do not. | FR-073 puts a trainer's branding on the join page, which is reached before an account exists. The exposure is a logo the trainer is printing on flyers, behind an opaque key. If branding ever carried something non-public, this endpoint is where that assumption breaks. |
+| **The coach half of FR-101 is not implemented** | A coach sees the platform default, not their trainer's branding. | Which trainer a coach works for is US-01.08, out of scope, so `coach_details` has no employer column and nothing could populate one. `branding_service.resolve_for_viewer` carries the branch and a `TODO(US-01.08)`; adding the column speculatively would be building US-01.08 ahead of its spec, which Principle I forbids. **This is a known gap between FR-101 as written and what ships.** R-33. |
+
+### Open dependency to raise before implementation
+
+FR-101 cannot be fully satisfied until US-01.08 (trainer invites coach) establishes the coach-to-
+trainer relationship. Everything else in User Story 8 ships complete: trainers set their branding,
+players see it in the right context, the join page is branded, and the platform default holds
+everywhere else. The coach audience is one function branch away and is marked as such. If the coach
+half is required in this slice, the coach-to-trainer link has to come into scope with it — that is a
+spec decision, not a plan one.

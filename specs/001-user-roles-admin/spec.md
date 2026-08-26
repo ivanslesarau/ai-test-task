@@ -1,17 +1,32 @@
-# Feature Specification: User Roles, Authorization & Super Admin User Management
+# Feature Specification: User Roles, Super Admin Management, ShareLink Onboarding & Portal Branding
 
 **Feature Branch**: `001-user-roles-admin`
 
 **Created**: 2026-08-19
 
-**Status**: Draft
+**Status**: Draft — extended 2026-08-26 with player ShareLink onboarding (US-01.02),
+multi-trainer association, and trainer portal branding (US-01.14)
 
 **Input**: User description: "Read file Task/Epics/Epic-01_User_Management_Authentication_SPEC.md. Create specification (spec.md) only for initial Database structure (4 roles), authorizations and Super Admin functionality (US-01.01, US-01.11, US-01.12, US-01.13). Ignore other user stories for now."
 
+**Input (2026-08-26 extension)**: User description: "Update spec.md. Add the implementation of
+the ShareLink system for inviting players (US-01.02), if it not implemented, and the coach
+portal customization (US-01.14) from the Task/Epics/Epic-01_User_Management_Authentication_SPEC.md
+file. Note that a single player can be associated with multiple coaches (Multi-Trainer
+Association)."
+
 **Source Epic**: Epic-01 — User Management & Authentication. This specification covers the
 foundational account structure, sign-in and permission enforcement, plus epic stories US-01.01,
-US-01.11, US-01.12, and US-01.13. All other Epic-01 stories are explicitly out of scope
-(see Out of Scope).
+US-01.11, US-01.12, US-01.13, US-01.02, and US-01.14. The remaining Epic-01 stories are
+explicitly out of scope (see Out of Scope).
+
+**Scope note on the 2026-08-26 extension**: Stories 1 to 5 and requirements FR-001 to FR-064 are
+unchanged and already implemented. Stories 6 to 8 and requirements FR-065 to FR-104 are the newly
+specified slice: the ShareLink invitation system players join through (US-01.02), the
+multi-trainer association and separated per-trainer views that story requires, and trainer
+portal branding (US-01.14). Branding is owned by a Trainer and *seen* by that trainer's coaches
+and players — the epic assigns the customization itself to the Trainer role, so that is what is
+specified here; coaches consume the branding but cannot change it.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -232,6 +247,135 @@ compliance record captures the original identity, the acting administrator, the 
 
 ---
 
+### User Story 6 - A Player or Parent Joins a Trainer Through an Invitation Link (Priority: P1)
+
+A trainer hands out a single durable invitation link — printed on a flyer, pasted into a message,
+posted on social media. Anyone who opens it lands on a join page that names the trainer they are
+about to join. Someone without an account registers right there: their own name, email address,
+password and phone number, plus the name, age and gender of the player who will train. The moment
+registration completes they are signed in, connected to that trainer, and looking at that trainer's
+area; the trainer sees them on their roster; a confirmation email arrives.
+
+**Why this priority**: This is the only way a player or parent can reach the platform on their own.
+Until it exists, every player account has to be hand-created by a Super Admin, which is not how the
+business acquires players. It is the entry point that every player-facing epic depends on.
+
+**Independent Test**: Create a trainer, take their invitation link, open it in a browser with no
+session, register, and confirm that the new person can sign in and see that trainer's area while the
+trainer sees the new player on their roster. This delivers self-service player onboarding on its
+own, with no other new story shipped.
+
+**Acceptance Scenarios**:
+
+1. **Given** a Trainer whose invitation link is active, **When** a visitor with no session opens it,
+   **Then** they see a join page naming that trainer and showing that trainer's branding, offering
+   both registration and sign-in.
+2. **Given** the join page, **When** the visitor submits valid account and player detail, **Then**
+   an Active account with the Player/Parent role is created together with its profile and player
+   detail, and an association to that trainer is recorded naming the link that produced it and the
+   time it happened.
+3. **Given** registration has just completed, **When** the person is returned to the platform,
+   **Then** they are already signed in, their landing area is that trainer's context, and a
+   confirmation email naming the trainer has been sent to the address they registered with.
+4. **Given** the submitted email already belongs to any account, **When** registration is submitted,
+   **Then** it is refused with an invitation to sign in and follow the link again, and no second
+   account exists.
+5. **Given** an invitation code that has been revoked, has expired, has no owner, or whose trainer is
+   not Active, **When** it is opened, **Then** a plain message says the link is no longer valid, no
+   registration form is offered, and the trainer is not identified.
+6. **Given** the registration form, **When** a required field is missing or the player's age falls
+   outside the permitted range, **Then** the message appears beside the offending field on submit
+   and nothing is stored.
+7. **Given** a registration that fails partway, **When** the person retries with corrected detail,
+   **Then** no half-made account, profile, or association from the first attempt is left behind.
+
+---
+
+### User Story 7 - A Player Trains With Several Trainers and Switches Between Them (Priority: P2)
+
+A player or parent already using the platform is handed a second trainer's invitation link. Opening
+it while signed in connects them to that trainer immediately — no second account, no second
+password, no re-registration. From then on their navigation carries a trainer switcher, and each
+trainer is a world of its own: whatever the platform shows them belongs to the trainer they are
+currently in, and nothing is ever mixed together. The trainer they last used is the one waiting for
+them the next time they sign in.
+
+**Why this priority**: Multi-trainer membership is the shape of the business — a family trains with
+a basketball academy and a strength coach — and it has to be settled in the data before any
+trainer-owned data (events, tokens, content) is built on top of it. It follows Story 6 only because
+a person must be able to join one trainer before they can join two.
+
+**Independent Test**: Associate one player account with two trainers, then confirm that exactly one
+account exists, that both trainers appear in the switcher, that every view shows only the active
+trainer's data, and that the chosen trainer survives signing out and back in.
+
+**Acceptance Scenarios**:
+
+1. **Given** a signed-in Player/Parent already associated with Trainer A, **When** they open Trainer
+   B's invitation link, **Then** a second association is recorded, no new account is created, they
+   are told they have joined Trainer B, and their active context becomes Trainer B.
+2. **Given** a player already associated with a trainer, **When** they open that trainer's link
+   again, **Then** they are told they are already connected, no duplicate association is recorded,
+   and the link's usage count does not rise.
+3. **Given** a player associated with two trainers, **When** they sign in, **Then** the trainer they
+   were last using is the active context and the switcher lists both trainers.
+4. **Given** an active context of Trainer A, **When** the player switches to Trainer B, **Then**
+   every view they can reach shows Trainer B's data only, no view anywhere combines the two, and
+   nothing belonging to Trainer A remains on screen.
+5. **Given** a player associated with exactly one trainer, **When** they sign in, **Then** no
+   switcher is offered and they land in that trainer's context.
+6. **Given** a player whose active trainer's account is deactivated, **When** they next open the
+   platform, **Then** that trainer is gone from the switcher, they are moved to another trainer they
+   still belong to, and if none remain they are told they are not currently connected to any trainer.
+7. **Given** a Trainer viewing their own roster, **When** one of their players also trains with
+   another trainer, **Then** nothing in any view available to that trainer reveals the other
+   trainer's existence or that player's activity elsewhere.
+8. **Given** a signed-in Super Admin, Trainer, or Coach, **When** they open a player invitation
+   link, **Then** the platform explains that only players and parents can join through it and
+   records no association.
+
+---
+
+### User Story 8 - A Trainer Puts Their Own Brand on Their Portal (Priority: P3)
+
+A trainer opens their portal settings, uploads their logo, picks the primary colour of their brand,
+sees both applied in a preview before committing, and saves. From that moment their own views, their
+coaches' views, and the views of every player and parent while inside that trainer's context carry
+that logo and that colour. A reset puts the platform's default back.
+
+**Why this priority**: Branding changes how the product looks but not what it can do — every other
+story works without it. It is nonetheless in the MVP because trainers sell their own identity to
+their players, and it is the visible difference between "a platform I was told to use" and "my
+academy's portal".
+
+**Independent Test**: As a trainer, upload a logo and set a colour, then sign in as one of that
+trainer's coaches and as a player associated with that trainer and confirm both see the branding,
+while a player in a different trainer's context sees the platform default.
+
+**Acceptance Scenarios**:
+
+1. **Given** a Trainer in their branding settings, **When** they choose an image of an accepted type
+   within the size limit, **Then** they see it previewed in place before saving, and only on saving
+   does it appear in the header of their portal.
+2. **Given** the branding settings, **When** the trainer picks a primary colour, **Then** the
+   preview updates as they choose, and on saving that colour drives the accents and gradient
+   everywhere in their portal.
+3. **Given** saved branding, **When** the trainer chooses reset, **Then** both the logo and the
+   colour return to the platform default and the stored custom values are cleared.
+4. **Given** a file of an unaccepted type or one over the size limit, **When** it is chosen, **Then**
+   the reason appears beside the control and the branding already in place is untouched.
+5. **Given** a logo larger than the recommended display size, **When** it is saved, **Then** it is
+   reduced to fit without distortion rather than refused.
+6. **Given** a player associated with a branded Trainer A and an unbranded Trainer B, **When** they
+   switch context, **Then** the header shows Trainer A's logo and colour in A's context and the
+   platform default in B's.
+7. **Given** a trainer saves a branding change, **When** one of their coaches opens their next view,
+   **Then** the new branding is already showing without that coach having signed out and in again.
+8. **Given** a Coach or a player, **When** they look for branding settings, **Then** the settings are
+   not offered to them and a direct attempt to change another account's branding is refused.
+
+---
+
 ### Edge Cases
 
 - **Last Super Admin**: What happens when the only remaining active Super Admin account is
@@ -259,6 +403,38 @@ compliance record captures the original identity, the acting administrator, the 
 - **Role reserved for later onboarding**: Coach and Player/Parent accounts arrive through
   invitation flows that are out of scope here; the platform must still store and enforce those two
   roles correctly so that this feature does not have to change when those flows are added.
+- **Invitation link for an unusable trainer**: A link whose owning trainer has been deactivated or
+  erased must stop admitting anyone, and must not disclose the trainer's name while refusing.
+- **Wrong kind of person follows a player link**: A signed-in Super Admin, Trainer, or Coach opening
+  a player invitation link must be told it is not for them; no association and no role change occurs.
+- **Two registrations racing on one email**: When the same email is submitted twice at nearly the
+  same moment, exactly one account results and the other attempt is refused as a duplicate.
+- **The same link followed twice**: A person already connected to the trainer gains nothing and
+  costs the link nothing — no second association, no extra recorded use.
+- **A revoked link after the fact**: Revoking a link stops new joins but must leave every
+  association it already produced fully intact.
+- **Code guessing**: Invitation codes must be impractical to discover by trying values, and repeated
+  invalid codes from one origin must be throttled.
+- **Erased player on a roster**: A player who exercises the right to erasure must remain on each
+  trainer's roster as "Deleted User" so counts stay correct, with no recoverable personal detail.
+- **The active trainer disappears**: When the trainer a player is currently viewing becomes
+  unavailable, the player must be moved to another trainer they belong to, or told plainly that they
+  belong to none.
+- **A player who belongs to no trainer**: An account can exist with zero associations — created by a
+  Super Admin, or left behind when its only trainer is deactivated — and every player view must cope
+  with having no context to show.
+- **Cross-trainer disclosure**: Nothing a trainer can reach may reveal that one of their players
+  also trains elsewhere; the isolation runs in both directions.
+- **Logo replacement**: When a logo is replaced or reset, the previously stored image must not remain
+  reachable, exactly as for profile photos.
+- **A brand colour that hides the text**: A colour that would leave text unreadable against it must
+  not produce an unreadable portal; the platform adjusts the foreground rather than accepting the
+  combination as-is.
+- **Uploaded artwork carrying active content**: A vector logo may contain scripts or external
+  references; anything capable of executing must be stripped before the image is ever shown to
+  another person.
+- **Branding while signed in**: A branding change must reach people already using the portal on
+  their next view, without requiring them to sign out.
 
 ## Requirements *(mandatory)*
 
@@ -455,6 +631,135 @@ compliance record captures the original identity, the acting administrator, the 
   both first creation and re-invitation, and MUST name re-invitation as the way to try again. A
   failed delivery MUST NOT be reported as a success.
 
+**Invitation links (ShareLinks): issuance and lifecycle**
+
+- **FR-065**: System MUST make available to every Trainer a standing player invitation link that
+  belongs to that trainer alone, never expires, and admits an unlimited number of people, so one
+  link can be printed, shared, and posted without maintenance.
+- **FR-066**: System MUST identify each invitation link by a code that is safe to place in a web
+  address, unique across the platform, and drawn from enough randomness that valid codes cannot
+  practically be found by trying values. A code MUST NOT be derivable from the owning account's
+  identifier, name, or creation time.
+- **FR-067**: System MUST record for each invitation link its owning trainer, who created it, its
+  kind, when it was created, its expiry if it has one, its maximum number of uses if it has one, how
+  many times it has been used, and whether it is currently active.
+- **FR-068**: System MUST record, for every association an invitation link produces, which link
+  produced it and when, and MUST increase that link's usage count by exactly one per association
+  produced.
+- **FR-069**: Trainers MUST be able to see their own invitation link, copy it, and replace it with a
+  freshly generated one. Replacing a link MUST stop the old code admitting anyone from that moment
+  and MUST leave every association the old code already produced untouched.
+- **FR-070**: System MUST refuse an invitation code that is unknown, revoked, expired, exhausted, or
+  whose owning trainer is not Active, stating plainly that the link is not valid, offering no
+  registration form, and disclosing nothing about the trainer or about which of those reasons
+  applies.
+- **FR-071**: System MUST rate-limit attempts to open invitation codes per origin, so that codes
+  cannot be discovered by repeated guessing.
+- **FR-072**: System MUST distinguish, on every invitation link, the kind of link it is — a standing
+  link that players use repeatedly, or a single-use link addressed to one named person and expiring
+  on a date. Only the standing player kind is issued in this feature; the record MUST carry the
+  distinction so the coach invitation flow can be added without restructuring what already exists.
+
+**Joining a trainer through an invitation link**
+
+- **FR-073**: System MUST show anyone opening a valid invitation link a join page that names the
+  owning trainer's business and shows that trainer's branding before any personal detail is asked
+  for, and MUST offer both registration and sign-in from that page.
+- **FR-074**: A visitor with no session MUST be able to register from the join page by supplying the
+  account holder's first name, last name, email address, password, and phone number, together with
+  the player's name, age, and gender. On success the platform MUST create exactly one account with
+  the Player/Parent role and status Active, exactly one profile, and exactly one player detail
+  record.
+- **FR-075**: System MUST apply to a password chosen during registration the same strength rules
+  FR-014 states, and MUST NEVER store or transmit it in a recoverable form.
+- **FR-076**: System MUST refuse registration when the submitted email address is already in use by
+  any account in any status, under the same uniqueness rule as FR-004, and MUST tell the person to
+  sign in and follow the link again instead.
+- **FR-077**: System MUST ask, during registration, whether the person is registering themselves as
+  the player or registering a player they are responsible for. When they are the player, the age
+  given MUST be 18 or above; when they are registering someone they are responsible for, the age
+  given MUST be between 1 and 18. Any other value MUST be refused beside the field.
+- **FR-078**: System MUST, on successful registration through an invitation link, record an Active
+  association between the new account and the link's owning trainer, admit the person without a
+  further sign-in step, and land them in that trainer's context.
+- **FR-079**: System MUST send a confirmation email naming the trainer to the address used at
+  registration. A failure to deliver MUST NOT undo the registration or the association, MUST be
+  recorded, and MUST NOT be reported to the person as a delivery success.
+- **FR-080**: A signed-in Player/Parent who opens a valid invitation link MUST be associated with
+  that trainer immediately, without registering again and without supplying any detail, and MUST be
+  shown a confirmation naming the trainer they have joined.
+- **FR-081**: System MUST refuse to associate an account whose role is not Player/Parent through a
+  player invitation link, explaining that the link is for players and parents, and MUST change
+  nothing about that account.
+- **FR-082**: System MUST NOT create a second association when a person opens an invitation link for
+  a trainer they are already associated with; it MUST tell them they are already connected and MUST
+  NOT increase the link's usage count.
+- **FR-083**: System MUST leave nothing behind when a registration through an invitation link fails
+  partway — no account, no profile, no player detail, and no association may survive a failed
+  attempt.
+
+**Multi-trainer associations and separated views**
+
+- **FR-084**: System MUST allow one Player/Parent account to hold associations with any number of
+  trainers at the same time, each recorded independently with its own originating link, joining
+  time, and status.
+- **FR-085**: System MUST NOT create a second account for a person joining an additional trainer;
+  one person has one account and one password however many trainers they train with.
+- **FR-086**: System MUST maintain, for every Player/Parent holding at least one Active association,
+  an active trainer context. That context MUST persist for the whole session and MUST be restored to
+  the trainer last used when the person signs in again, on any device.
+- **FR-087**: System MUST scope everything shown to a Player/Parent to their active trainer context
+  alone, and MUST NOT offer any view that combines or totals data across two trainers.
+- **FR-088**: System MUST offer a context switcher listing every trainer the person holds an Active
+  association with, MUST switch the whole view on selection, and MUST NOT show the switcher when the
+  person is associated with exactly one trainer.
+- **FR-089**: System MUST exclude from the switcher any association that is not Active and any
+  trainer whose account is not Active. When the active context becomes unavailable, the platform
+  MUST move the person to another available trainer, or, if none remains, tell them plainly that
+  they are not currently connected to a trainer.
+- **FR-090**: System MUST show each Trainer only the players associated with that trainer, and MUST
+  NOT reveal to any trainer, through any view or export available to them, that one of their players
+  is also associated with another trainer.
+- **FR-091**: System MUST preserve every association belonging to an erased account, showing the
+  erased person on each trainer's roster as "Deleted User" under FR-045 and FR-046, so participant
+  counts stay accurate.
+- **FR-092**: System MUST leave the associations of a deactivated account intact and reversible, so
+  reactivation restores that person's trainers exactly as they were.
+
+**Trainer portal branding**
+
+- **FR-093**: Trainers MUST be able to reach branding settings for their own organization. Only the
+  owning trainer may change that organization's branding; Coaches and Players/Parents MUST NOT be
+  offered the settings, and a request to change another organization's branding MUST be refused.
+- **FR-094**: System MUST accept a portal logo supplied as a PNG, JPEG, or SVG image of at most 2 MB,
+  and MUST refuse any other type or a larger file with the reason shown beside the control while the
+  branding already in place stays unchanged.
+- **FR-095**: System MUST remove any executable or externally-referencing content from an uploaded
+  vector logo before it is stored or shown to anyone.
+- **FR-096**: System MUST fit a logo larger than the recommended 200×200 display size to that size
+  without distorting its proportions, rather than refusing it.
+- **FR-097**: System MUST preview a chosen logo and a chosen colour in place before they are saved,
+  and MUST NOT apply either to anyone until the trainer saves.
+- **FR-098**: System MUST accept a primary brand colour given as a hexadecimal colour code and MUST
+  use it for the portal's accent colours and gradient.
+- **FR-099**: System MUST keep text and interactive elements legible against whatever primary colour
+  is chosen, adjusting the foreground automatically rather than storing a combination that cannot be
+  read.
+- **FR-100**: Trainers MUST be able to reset branding, returning both logo and colour to the
+  platform default and clearing the stored custom values.
+- **FR-101**: System MUST show a trainer's branding to that trainer, to that trainer's coaches, and
+  to every Player/Parent whose active trainer context is that trainer. Every other view — sign-in,
+  the Super Admin's own area, and any context belonging to a different trainer — MUST show the
+  platform default.
+- **FR-102**: System MUST make a saved branding change visible on the next view any affected person
+  opens, without requiring them to sign out and in again.
+- **FR-103**: System MUST ensure that a logo replaced or reset is no longer reachable, in the same
+  way FR-034 requires of replaced profile photos.
+- **FR-104**: System MUST store branding per trainer as a logo reference and a primary colour, each
+  of which may be absent. An absent value means the platform default and MUST be recorded as absent
+  rather than as an empty value.
+
+
 ### Key Entities *(include if feature involves data)*
 
 - **User Account**: One person's identity and means of entry. Holds unique email, hashed password,
@@ -483,6 +788,20 @@ compliance record captures the original identity, the acting administrator, the 
 - **Erasure Compliance Record**: The legally retained trace of one privacy erasure — original
   account identifier, original email address, acting Super Admin, stated reason, timestamp.
   Readable only by Super Admins.
+- **Invitation Link (ShareLink)**: A trainer's standing offer to join them, addressed by an
+  unguessable code. Holds the owning trainer, its creator, its kind, creation time, optional expiry,
+  optional maximum uses, its running usage count, and whether it is active. One trainer has one
+  standing player link at a time; replacing it retires the previous code.
+- **Trainer–Player Association**: The fact that one Player/Parent account trains with one Trainer.
+  Holds the trainer, the player account, the invitation link that produced it, when it was formed,
+  and its status. Many per player and many per trainer; the pair is unique. Survives the erasure and
+  the deactivation of either side.
+- **Active Trainer Context**: Which of a Player/Parent's trainers they are currently looking at.
+  Exactly one per player account at a time, remembered against the account so it is the same
+  wherever they sign in, and the boundary that scopes every view they see.
+- **Trainer Portal Branding**: The visual identity one Trainer presents to their own organization —
+  a logo reference and a primary brand colour, either of which may be absent, plus when it last
+  changed. Exactly one per Trainer account; absent values mean the platform default.
 
 ## Success Criteria *(mandatory)*
 
@@ -519,22 +838,56 @@ compliance record captures the original identity, the acting administrator, the 
 - **SC-014**: The navigation frame is present on 100% of views reachable while signed in and on 0% of
   views reachable before signing in, and returning to a filtered directory from any account opened
   from it restores that filtered view unchanged.
+- **SC-015**: A person with no account can go from opening a trainer's invitation link to standing in
+  that trainer's area, registered and signed in, in under 3 minutes, and appears on that trainer's
+  roster immediately.
+- **SC-016**: A signed-in player who opens a second trainer's invitation link is associated and
+  viewing that trainer's context within 5 seconds, and exactly one account still exists for them.
+- **SC-017**: Across a test set of players associated with two trainers, 100% of views show data
+  belonging to the active context only, and no view returns data from the other trainer.
+- **SC-018**: Switching trainer context completes within 2 seconds, and the trainer chosen is still
+  the active one after signing out and signing back in on a different device.
+- **SC-019**: 100% of registrations and joins made through an invitation link record which link
+  produced them and raise that link's usage count by exactly one; repeat visits by an
+  already-connected person raise it by zero.
+- **SC-020**: A replaced invitation link stops admitting new people within 1 minute, while 100% of
+  the associations it previously produced remain intact.
+- **SC-021**: An automated trial of 10,000 invalid invitation codes from one origin discovers no
+  valid link and is throttled after no more than 10 consecutive invalid codes.
+- **SC-022**: A trainer can upload a logo and set a brand colour in under 2 minutes, and their
+  coaches and players see the change within 1 minute without signing out.
+- **SC-023**: 100% of accepted brand colours produce text and controls meeting a contrast ratio of at
+  least 4.5:1 against the surfaces they sit on.
+- **SC-024**: A player associated with one branded and one unbranded trainer sees the correct
+  branding in 100% of context switches, with no flash of the other trainer's identity.
+- **SC-025**: No trainer-facing view or export reveals that one of their players trains with another
+  trainer, verified by a test covering every view available to a Trainer and to a Coach.
 
 ## Out of Scope
 
 The following Epic-01 items are deliberately excluded from this feature and belong to later slices:
 
-- Player and Parent registration through trainer ShareLinks (US-01.02), and ShareLink generation,
-  tracking, and expiry of any kind.
 - Parent-created child profiles, parent/child relationships, and child login constraints
-  (US-01.03, US-01.04, US-01.06).
+  (US-01.03, US-01.04, US-01.06). A registration through an invitation link therefore creates
+  exactly one player, not a family.
+- The family-member selection prompt US-01.02 describes for a parent joining an additional
+  trainer — "who will train with this trainer?", answered against the parent and their children
+  — is deferred with child profiles. Until then, joining a trainer associates the one player the
+  account holds.
+- Coach invitation links: the single-use, one-person, seven-day variety and the rule that a coach
+  works for exactly one trainer (US-01.08). The invitation link record carries a kind so this can
+  be added without restructuring, but no such link is issued here.
+- Reporting and analytics over invitation link usage, including conversion and referral tracking
+  (Epic-06). Usage is recorded here; only later epics read it as analytics.
+- Trainer-side management of an existing association — removing a player from their roster, or a
+  parent editing which trainers a family member trains with (US-01.04). Associations here are
+  formed by joining and end only when an account leaves Active status.
+- Branding beyond one logo and one primary colour: separate light and dark logos, font choices,
+  and layout customization are Phase 2 in the epic.
 - Child purchase approval workflows (US-01.05).
 - Super Admin impersonation of other users and its audit log (US-01.07).
-- Trainer invitation of coaches and the single-trainer coach assignment rule (US-01.08).
 - Player and coach availability, "Best Times", and availability conflict overrides
   (US-01.09, US-01.10).
-- Trainer portal branding — logo upload and colour selection (US-01.14).
-- Multi-trainer player associations and the separated per-trainer views they imply.
 - Camp-to-user conversion from Epic-08.
 - Self-service password reset for a person who has forgotten an established password, and standalone
   email-address verification. Only the invitation-driven first-password flow that US-01.01 requires
@@ -584,3 +937,41 @@ The following Epic-01 items are deliberately excluded from this feature and belo
   in later epics; this feature only establishes the roles that isolation will be based on.
 - **Audit retention**: Audit entries and compliance records are retained indefinitely; no purge
   policy is specified in this feature.
+
+**Assumptions added with the 2026-08-26 extension**
+
+- **One standing link per trainer**: Epic-01 says a trainer's player link is static, unlimited, and
+  never expires, but not how many a trainer may hold. Exactly one standing link per trainer is
+  assumed, replaceable when a trainer wants the old code retired. Multiple named campaign links are
+  a marketing concern and belong with Epic-06.
+- **What "registering a player" creates here**: US-01.02's form collects parent contact details and
+  player details together. Because child profiles (US-01.03) are out of scope, a registration is
+  assumed to create one account holding one player. Whether that player is the account holder or a
+  dependant is captured at registration (FR-077) so the family structure can be layered on later
+  without re-asking.
+- **Age boundary**: Epic-01 states that everyone under 18 trains through a parent-managed account and
+  that child ages run 1 to 18. It follows that a person registering themselves is 18 or over; that
+  reading is assumed rather than a separate rule.
+- **The confirmation email is not a verification step**: The email sent after joining confirms the
+  association and names the trainer. Standalone email-address verification remains out of scope, as
+  it already was, so the confirmation carries no link that must be followed.
+- **Where the active trainer context lives**: It is assumed to be remembered against the account
+  rather than the browser, so a family that switches devices finds the same trainer waiting. This is
+  a behaviour assumption, not a storage decision.
+- **"Separated views" in this slice**: Epic-01's separated-views architecture concerns calendars,
+  tokens, content, and reservations, none of which exist yet. Here the requirement is established as
+  a rule — every player-facing view is scoped to the active trainer and no combined view exists —
+  so the epics that add that data inherit the boundary rather than retrofitting it.
+- **Vector logos are accepted but sanitized**: The epic lists PNG and JPG in one place and PNG, JPG,
+  and SVG in its validation rules. All three are assumed accepted, on the assumption that an SVG is
+  stripped of anything executable before storage, since an uploaded vector is otherwise a way to run
+  code in another person's browser.
+- **Legibility outranks the chosen colour**: The epic asks for a hex colour and says nothing about
+  contrast. It is assumed the platform derives readable foreground colours from whatever primary
+  colour is chosen, rather than refusing colours or letting a portal become unreadable.
+- **Branding audience**: The epic says branding is visible to a trainer's players, coaches, and
+  parents. It is assumed that Super Admin views and pre-sign-in views keep the platform default, so
+  administrators always know which platform they are on.
+- **A player may belong to no trainer**: Super Admin-created Player/Parent accounts (FR-030) and
+  accounts whose only trainer was deactivated hold zero associations. Such an account is assumed to
+  be valid and to see an empty state rather than an error.
