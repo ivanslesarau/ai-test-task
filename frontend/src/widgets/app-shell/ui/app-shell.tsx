@@ -71,9 +71,11 @@ function CrumbLink({ crumb }: { crumb: BreadcrumbCrumb }) {
 /**
  * Persistent header for every authenticated page (`routes/_authed.tsx`
  * only — never `__root.tsx`, which also carries `/login` and
- * `/set-password`). Composes `shared/ui` primitives, the breadcrumb model
- * from this same widget, and the session query; holds no server state of
- * its own and copies nothing into Zustand (constitution Principle IV).
+ * `/set-password`). Composes `shared/ui` primitives — a generic
+ * from this same widget, the signed-in person's name and role from
+ * the `session` query, a typed `/profile` link, and sign-out — and holds
+ * no server state of its own; copies nothing into Zustand (constitution
+ * Principle IV).
  */
 export function AppShell() {
   const { data: user } = useSession();

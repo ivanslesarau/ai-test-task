@@ -3,6 +3,24 @@ from pydantic import ValidationError
 
 from app.core.config import Settings
 
+# Every environment variable the `Settings` model can read that these tests
+# rely on being *absent*. `backend/.env` (an ambient, developer-specific
+# file — never committed with real values, but present on some machines
+# with a real SMTP relay configured) and a developer's own exported shell
+# variables can otherwise silently supply these, which would make a test
+# that omits a key from its kwargs unable to prove the validator rejects
+# its absence (see specs/001-user-roles-admin bug report, Defect 2).
+_ENV_KEYS_UNDER_TEST = (
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USERNAME",
+    "SMTP_PASSWORD",
+    "SMTP_FROM_ADDRESS",
+    "SMTP_TLS",
+    "SMTP_TIMEOUT_SECONDS",
+    "EMAIL_OUTBOX_DIR",
+)
+
 
 def _base_kwargs(**overrides: object) -> dict[str, object]:
     kwargs: dict[str, object] = {
@@ -24,31 +42,59 @@ def _base_kwargs(**overrides: object) -> dict[str, object]:
     return kwargs
 
 
-def test_filesystem_backend_constructs_without_any_smtp_key() -> None:
-    Settings(**_base_kwargs(email_backend="filesystem"))
+def _isolated_settings(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> Settings:
+    """Construct `Settings` isolated from the ambient `.env` file and from
+    any of these keys a developer's own shell might export — kwargs passed
+    here are the *only* source for them, so a test that omits a key proves
+    the validator actually rejects its absence rather than reading a value
+    that happened to be lying around in the environment."""
+    for key in _ENV_KEYS_UNDER_TEST:
+        monkeypatch.delenv(key, raising=False)
+    return Settings(_env_file=None, **_base_kwargs(**overrides))  # type: ignore[call-arg]
 
 
-def test_smtp_backend_without_smtp_host_fails_to_construct() -> None:
+def test_filesystem_backend_constructs_without_any_smtp_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_settings(monkeypatch, email_backend="filesystem")
+
+
+def test_smtp_backend_without_smtp_host_fails_to_construct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with pytest.raises(ValidationError, match="SMTP_HOST"):
-        Settings(**_base_kwargs(email_backend="smtp", smtp_from_address="noreply@example.org"))
-
-
-def test_smtp_backend_without_smtp_from_address_fails_to_construct() -> None:
-    with pytest.raises(ValidationError, match="SMTP_FROM_ADDRESS"):
-        Settings(**_base_kwargs(email_backend="smtp", smtp_host="smtp.example.org"))
-
-
-def test_smtp_backend_with_both_required_keys_constructs() -> None:
-    Settings(
-        **_base_kwargs(
+        _isolated_settings(
+            monkeypatch,
             email_backend="smtp",
-            smtp_host="smtp.example.org",
             smtp_from_address="noreply@example.org",
         )
+
+
+def test_smtp_backend_without_smtp_from_address_fails_to_construct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="SMTP_FROM_ADDRESS"):
+        _isolated_settings(
+            monkeypatch,
+            email_backend="smtp",
+            smtp_host="smtp.example.org",
+        )
+
+
+def test_smtp_backend_with_both_required_keys_constructs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_settings(
+        monkeypatch,
+        email_backend="smtp",
+        smtp_host="smtp.example.org",
+        smtp_from_address="noreply@example.org",
     )
 
 
-def test_smtp_tls_and_timeout_default_sensibly() -> None:
-    settings = Settings(**_base_kwargs(email_backend="filesystem"))
+def test_smtp_tls_and_timeout_default_sensibly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _isolated_settings(monkeypatch, email_backend="filesystem")
     assert settings.smtp_tls == "starttls"
     assert settings.smtp_timeout_seconds == 10

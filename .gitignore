@@ -23,6 +23,7 @@ frontend/.env
 *.log
 npm-debug.log*
 .tanstack/
+*.tsbuildinfo
 
 # Editors / OS
 .vscode/

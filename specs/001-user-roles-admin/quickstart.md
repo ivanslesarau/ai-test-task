@@ -226,6 +226,24 @@ respectively. Both passed as of this walkthrough.
 No divergence found between this table and the documented behaviour above it, once the bug-fix slice
 is applied.
 
+**Correction (2026-08-26)**: the walkthrough above was performed by hand against a running dev
+server, which does not run `tsc`/ESLint and therefore did not surface that the full §6 quality gate
+was, at that time, **not** green: `frontend/src/widgets/app-shell/ui/app-shell.tsx` imported
+`BackButton` but never rendered it (a JSX comment stood in for the real usage), which failed
+`tsc -p tsconfig.app.json --noEmit`, `eslint`, and `npm run build`; `backend/tests/unit/test_settings_validation.py`
+read the ambient `backend/.env` instead of being isolated from it, so its two negative-construction
+tests could not fail on a machine with a real SMTP relay configured; and SC-013's history-entry half
+was asserted only by inspection, not by a test. All three are fixed: the shell now renders a
+`BackButton` region per contracts/frontend-contracts.md §7.3 (in addition to, not instead of, the
+page-level `BackButton`s from T183–T185), the settings tests construct `Settings(_env_file=None, ...)`
+with the relevant `SMTP_*` keys explicitly cleared via `monkeypatch.delenv`, and
+`frontend/tests/widgets/user-directory-table.test.tsx` now asserts `router.history.length` is
+unchanged by a settled 20-character search term. §6's full gate list — `ruff check`, `ruff format
+--check`, `mypy src`, `pytest -q`, `eslint`, a **non-incremental** `tsc --noEmit` (the incremental
+`tsc -b` used by `npm run typecheck` can read a stale `.tsbuildinfo` and print nothing even when the
+build is broken — `frontend/tsconfig.app.tsbuildinfo` was tracked in git for exactly this reason and
+has since been untracked), `npm run test`, and `npm run build` — now passes clean.
+
 ---
 
 ## 5. Cross-cutting checks

@@ -55,7 +55,7 @@ describe('UserDirectoryTable search debounce', () => {
     vi.useRealTimers()
   })
 
-  it('issues exactly one request carrying the full term after a settled search', async () => {
+  it('issues exactly one request and exactly one reversible navigation step after a settled 20-character search (SC-013)', async () => {
     mockSuperAdminSession()
     const requests: (string | null)[] = []
     server.use(
@@ -65,23 +65,37 @@ describe('UserDirectoryTable search debounce', () => {
       }),
     )
 
-    renderDirectory()
+    const router = renderDirectory()
     await vi.waitFor(() => expect(screen.getByRole('table')).toBeInTheDocument())
     const baseline = requests.length
     expect(requests.every((q) => q === null)).toBe(true)
+    const historyLengthBeforeTyping = router.history.length
+
+    const searchTerm = 'trainer-search-term1'
+    expect(searchTerm).toHaveLength(20)
 
     const input = screen.getByLabelText('Search by name or email') as HTMLInputElement
-    for (const char of 'trainer') {
+    for (const char of searchTerm) {
       fireEvent.change(input, { target: { value: input.value + char } })
     }
 
-    // Not yet settled: no additional request during the debounce window.
+    // Not yet settled: no additional request, and no additional history
+    // entry, during the debounce window.
     await vi.advanceTimersByTimeAsync(400)
     expect(requests).toHaveLength(baseline)
+    expect(router.history.length).toBe(historyLengthBeforeTyping)
 
     await vi.advanceTimersByTimeAsync(200)
     await vi.waitFor(() => expect(requests).toHaveLength(baseline + 1))
-    expect(requests.at(-1)).toBe('trainer')
+    expect(requests.at(-1)).toBe(searchTerm)
+
+    // Exactly one reversible navigation step (SC-013's second half): a
+    // settled search of any length — keystroke count is irrelevant —
+    // must land as a single `replace: true` entry, not a pushed one, so
+    // history length is unchanged from before typing began even though
+    // the location itself now carries the search term.
+    expect(router.history.length).toBe(historyLengthBeforeTyping)
+    expect(router.history.location.search).toContain(searchTerm)
   })
 })
 
