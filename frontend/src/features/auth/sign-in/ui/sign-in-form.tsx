@@ -1,9 +1,11 @@
-import { useForm } from '@tanstack/react-form'
+import { revalidateLogic, useForm } from '@tanstack/react-form'
 
 import { useSignIn } from '@/features/auth/sign-in/api/use-sign-in'
 import { signInSchema } from '@/features/auth/sign-in/model/schema'
 import { isApiError } from '@/shared/api/errors'
 import type { CurrentUser } from '@/shared/api/types'
+import { fieldErrorText } from '@/shared/lib/form-errors'
+import { normalizeEmptyToNull } from '@/shared/lib/normalize-payload'
 import { Button } from '@/shared/ui/button'
 import { FormItem, FormLabel, FormMessage } from '@/shared/ui/form-field'
 import { Input } from '@/shared/ui/input'
@@ -17,12 +19,19 @@ export function SignInForm({ onSuccess }: SignInFormProps) {
 
   const form = useForm({
     defaultValues: { email: '', password: '' },
-    validators: { onChange: signInSchema },
+    validationLogic: revalidateLogic({ mode: 'submit', modeAfterSubmission: 'change' }),
+    validators: { onDynamic: signInSchema },
     onSubmit: ({ value }) => {
+      // Every field here is required and non-empty by the time Zod lets
+      // submission through, so normalizeEmptyToNull is a no-op in
+      // practice — it still runs, because Principle VI requires every
+      // submit handler to route through the one shared normalizer, not
+      // just the ones with optional fields.
+      const normalized = normalizeEmptyToNull(value)
       // mutate() rather than mutateAsync(): the failure path is already
       // fully handled through signIn.isError/signIn.error below, so
       // nothing here needs to await or catch a rejected promise.
-      signIn.mutate(value, { onSuccess })
+      signIn.mutate(normalized, { onSuccess })
     },
   })
 
@@ -35,6 +44,13 @@ export function SignInForm({ onSuccess }: SignInFormProps) {
         event.preventDefault()
         void form.handleSubmit()
       }}
+      // The browser's own constraint validation for `type="email"` blocks
+      // the `submit` event entirely for a malformed value before React
+      // ever sees it — silent with submit-only validation, since nothing
+      // triggers on every keystroke anymore. `noValidate` hands all of it
+      // to the Zod schema, which is the one that actually renders a
+      // message (FR-057, FR-058).
+      noValidate
       className="flex flex-col gap-4"
     >
       <form.Field name="email">
@@ -49,7 +65,7 @@ export function SignInForm({ onSuccess }: SignInFormProps) {
               onBlur={field.handleBlur}
               onChange={(event) => field.handleChange(event.target.value)}
             />
-            <FormMessage>{field.state.meta.errors.map((e) => e?.message).join(', ')}</FormMessage>
+            <FormMessage>{fieldErrorText(field.state.meta.errors)}</FormMessage>
           </FormItem>
         )}
       </form.Field>
@@ -66,16 +82,16 @@ export function SignInForm({ onSuccess }: SignInFormProps) {
               onBlur={field.handleBlur}
               onChange={(event) => field.handleChange(event.target.value)}
             />
-            <FormMessage>{field.state.meta.errors.map((e) => e?.message).join(', ')}</FormMessage>
+            <FormMessage>{fieldErrorText(field.state.meta.errors)}</FormMessage>
           </FormItem>
         )}
       </form.Field>
 
       {topLevelError && <FormMessage>{topLevelError}</FormMessage>}
 
-      <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
-        {([canSubmit, isSubmitting]) => (
-          <Button type="submit" disabled={!canSubmit || isSubmitting}>
+      <form.Subscribe selector={(state) => state.isSubmitting}>
+        {(isSubmitting) => (
+          <Button type="submit" disabled={isSubmitting}>
             {isSubmitting ? 'Signing in…' : 'Sign in'}
           </Button>
         )}

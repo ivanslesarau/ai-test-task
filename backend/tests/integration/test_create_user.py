@@ -25,7 +25,7 @@ async def test_creates_a_trainer_with_business_name(
             "email": "new-trainer@example.org",
             "first_name": "Tara",
             "last_name": "Trainer",
-            "phone": "+15551234567",
+            "phone": "+14155552671",
             "business_name": "Elite Basketball Academy",
         },
     )
@@ -49,7 +49,7 @@ async def test_business_name_required_for_trainer_and_rejected_otherwise(
             "email": "trainer-no-biz@example.org",
             "first_name": "T",
             "last_name": "T",
-            "phone": "+15551234567",
+            "phone": "+14155552671",
         },
     )
     assert missing_business_name.status_code == 422
@@ -62,7 +62,7 @@ async def test_business_name_required_for_trainer_and_rejected_otherwise(
             "email": "coach-with-biz@example.org",
             "first_name": "C",
             "last_name": "C",
-            "phone": "+15551234567",
+            "phone": "+14155552671",
             "business_name": "Should not be here",
         },
     )
@@ -90,7 +90,7 @@ async def test_multiple_field_errors_use_the_shared_error_envelope(
             "email": "not-an-email",
             "first_name": "",
             "last_name": "X",
-            "phone": "+15551234567",
+            "phone": "+14155552671",
         },
     )
 
@@ -110,7 +110,7 @@ async def test_duplicate_email_is_rejected_and_no_partial_account_remains(
         "email": "duplicate@example.org",
         "first_name": "First",
         "last_name": "Coach",
-        "phone": "+15551234567",
+        "phone": "+14155552671",
     }
 
     first = await client.post("/admin/users", json=payload)
@@ -133,7 +133,7 @@ async def test_creates_coach_and_player_parent_with_no_trainer_relationship(
             "email": "new-coach@example.org",
             "first_name": "Cody",
             "last_name": "Coach",
-            "phone": "+15551234567",
+            "phone": "+14155552671",
         },
     )
     player_parent = await client.post(
@@ -143,7 +143,7 @@ async def test_creates_coach_and_player_parent_with_no_trainer_relationship(
             "email": "new-player@example.org",
             "first_name": "Pat",
             "last_name": "Player",
-            "phone": "+15551234567",
+            "phone": "+14155552671",
         },
     )
 
@@ -151,6 +151,48 @@ async def test_creates_coach_and_player_parent_with_no_trainer_relationship(
     assert coach.json()["user"]["role"] == "coach"
     assert player_parent.status_code == 201
     assert player_parent.json()["user"]["role"] == "player_parent"
+
+
+async def test_malformed_phone_is_rejected_with_a_field_attributed_422(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    client = await _as_super_admin(app_client, db_session)
+
+    response = await client.post(
+        "/admin/users",
+        json={
+            "role": "coach",
+            "email": "bad-phone@example.org",
+            "first_name": "Cody",
+            "last_name": "Coach",
+            "phone": "not-a-phone-number",
+        },
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "validation_failed"
+    assert any(f["field"] == "phone" for f in body["error"]["fields"])
+
+
+async def test_a_formatted_phone_number_is_stored_in_e164(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    client = await _as_super_admin(app_client, db_session)
+
+    response = await client.post(
+        "/admin/users",
+        json={
+            "role": "coach",
+            "email": "formatted-phone@example.org",
+            "first_name": "Cody",
+            "last_name": "Coach",
+            "phone": "+1 (415) 555-2671",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["user"]["phone"] == "+14155552671"
 
 
 async def test_only_super_admin_may_create_users(
@@ -168,7 +210,7 @@ async def test_only_super_admin_may_create_users(
             "email": "should-not-be-created@example.org",
             "first_name": "X",
             "last_name": "Y",
-            "phone": "+15551234567",
+            "phone": "+14155552671",
             "business_name": "Nope",
         },
     )

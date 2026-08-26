@@ -1,8 +1,9 @@
-import { useForm } from '@tanstack/react-form'
+import { revalidateLogic, useForm } from '@tanstack/react-form'
 
 import { useSetupPassword } from '@/features/auth/set-password/api/use-setup-password'
 import { setPasswordSchema } from '@/features/auth/set-password/model/schema'
-import { isApiError } from '@/shared/api/errors'
+import { fieldErrorText, toServerErrorMap } from '@/shared/lib/form-errors'
+import { normalizeEmptyToNull } from '@/shared/lib/normalize-payload'
 import { Button } from '@/shared/ui/button'
 import { FormItem, FormLabel, FormMessage } from '@/shared/ui/form-field'
 import { Input } from '@/shared/ui/input'
@@ -17,15 +18,35 @@ export function SetPasswordForm({ token, onSuccess }: SetPasswordFormProps) {
 
   const form = useForm({
     defaultValues: { password: '', confirmPassword: '' },
-    validators: { onChange: setPasswordSchema },
+    validationLogic: revalidateLogic({ mode: 'submit', modeAfterSubmission: 'change' }),
+    validators: { onDynamic: setPasswordSchema },
     onSubmit: ({ value }) => {
-      setup.mutate({ token, password: value.password }, { onSuccess })
+      // `password` is required and non-empty by the time Zod lets
+      // submission through, so this is a no-op in practice — it still
+      // runs, because Principle VI requires every submit handler to
+      // route through the one shared normalizer.
+      const normalized = normalizeEmptyToNull(value)
+      setup.mutate(
+        { token, password: normalized.password },
+        {
+          onSuccess,
+          onError: (error) => {
+            // Breached-password membership and password-policy failures
+            // both attribute to "password" from the server; routing them
+            // through the shared helper means this form needs no
+            // one-off `fieldMessage('password')` call of its own. The
+            // `onServer` slot is only typed once `useForm`'s dedicated
+            // type parameter is threaded through — nothing else about
+            // this form needs that, so the cast is scoped to this one
+            // call, against the setter's own parameter type.
+            form.setErrorMap({
+              onServer: toServerErrorMap(error),
+            } as unknown as Parameters<typeof form.setErrorMap>[0])
+          },
+        },
+      )
     },
   })
-
-  const topLevelError = setup.isError && isApiError(setup.error) ? setup.error.message : null
-  const passwordFieldError =
-    setup.isError && isApiError(setup.error) ? setup.error.fieldMessage('password') : null
 
   return (
     <form
@@ -33,6 +54,11 @@ export function SetPasswordForm({ token, onSuccess }: SetPasswordFormProps) {
         event.preventDefault()
         void form.handleSubmit()
       }}
+      // The browser's own constraint validation (e.g. for type="email")
+      // can block the submit event before React sees it once nothing
+      // validates on every keystroke; the Zod schema is the one source
+      // of truth for what renders (FR-057, FR-058).
+      noValidate
       className="flex flex-col gap-4"
     >
       <form.Field name="password">
@@ -46,9 +72,7 @@ export function SetPasswordForm({ token, onSuccess }: SetPasswordFormProps) {
               onBlur={field.handleBlur}
               onChange={(event) => field.handleChange(event.target.value)}
             />
-            <FormMessage>
-              {field.state.meta.errors.map((e) => e?.message).join(', ') || passwordFieldError}
-            </FormMessage>
+            <FormMessage>{fieldErrorText(field.state.meta.errors)}</FormMessage>
           </FormItem>
         )}
       </form.Field>
@@ -64,16 +88,26 @@ export function SetPasswordForm({ token, onSuccess }: SetPasswordFormProps) {
               onBlur={field.handleBlur}
               onChange={(event) => field.handleChange(event.target.value)}
             />
-            <FormMessage>{field.state.meta.errors.map((e) => e?.message).join(', ')}</FormMessage>
+            <FormMessage>{fieldErrorText(field.state.meta.errors)}</FormMessage>
           </FormItem>
         )}
       </form.Field>
 
-      {topLevelError && !passwordFieldError && <FormMessage>{topLevelError}</FormMessage>}
+      {/* The form-level message — including the `onServer` message
+          `toServerErrorMap` produces when a 422 carries no `fields` —
+          lands in `state.errors` alongside every other validation cause,
+          so reading it through the same `fieldErrorText` helper needs no
+          separate, unwrap-generic-dependent selector. */}
+      <form.Subscribe selector={(state) => state.errors}>
+        {(errors) => {
+          const message = fieldErrorText(errors)
+          return message ? <FormMessage>{message}</FormMessage> : null
+        }}
+      </form.Subscribe>
 
-      <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
-        {([canSubmit, isSubmitting]) => (
-          <Button type="submit" disabled={!canSubmit || isSubmitting}>
+      <form.Subscribe selector={(state) => state.isSubmitting}>
+        {(isSubmitting) => (
+          <Button type="submit" disabled={isSubmitting}>
             {isSubmitting ? 'Setting password…' : 'Set password'}
           </Button>
         )}

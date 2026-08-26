@@ -20,7 +20,7 @@ async def test_creating_a_user_writes_created_and_invited_audit_entries(
             "email": "audited-coach@example.org",
             "first_name": "Aud",
             "last_name": "Ited",
-            "phone": "+15551234567",
+            "phone": "+14155552671",
         },
     )
     assert created.status_code == 201

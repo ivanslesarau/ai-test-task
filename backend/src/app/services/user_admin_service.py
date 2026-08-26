@@ -76,6 +76,10 @@ class UserAdminService:
         if await self._users.get_by_email(email) is not None:
             raise Conflict("An account with this email address already exists.")
 
+        # `phone` arrives already normalized to E.164 — CreateUserRequest's
+        # own field_validator (app.core.phone) is the single place that
+        # rule is enforced, so the value stored here is exactly what that
+        # validator returned, never the caller's raw input (FR-022).
         user = await self._users.insert_account(
             NewAccountInput(
                 role=role,

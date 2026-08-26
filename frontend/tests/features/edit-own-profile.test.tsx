@@ -76,4 +76,48 @@ describe('EditProfileForm', () => {
     expect(body).not.toHaveProperty('skill_level')
     expect(body).not.toHaveProperty('jersey_number')
   })
+
+  it('submits an untouched optional field as null rather than the empty string', async () => {
+    let capturedBody: unknown = null
+    server.use(
+      http.patch('/api/v1/me/profile', async ({ request }) => {
+        capturedBody = await request.json()
+        return HttpResponse.json({ ...coachProfile, first_name: 'Changed' })
+      }),
+    )
+    renderForm(coachProfile)
+
+    // "bio" is editable for a Coach but was never touched — it renders as
+    // '' (the controlled-input default) and must cross the network as
+    // null, not '' (constitution Principle VI).
+    await userEvent.clear(screen.getByLabelText('First name'))
+    await userEvent.type(screen.getByLabelText('First name'), 'Changed')
+    await userEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(capturedBody).not.toBeNull())
+    const body = capturedBody as Record<string, unknown>
+    expect(body.bio).toBeNull()
+  })
+
+  it('renders a 422 field error from the server beside its own input', async () => {
+    server.use(
+      http.patch('/api/v1/me/profile', () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: 'validation_failed',
+              message: 'One or more fields are invalid.',
+              fields: [{ field: 'phone', message: 'Enter a valid phone number.' }],
+            },
+          },
+          { status: 422 },
+        ),
+      ),
+    )
+    renderForm(coachProfile)
+
+    await userEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    expect(await screen.findByText(/enter a valid phone number/i)).toBeInTheDocument()
+  })
 })

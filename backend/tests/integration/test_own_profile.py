@@ -95,6 +95,77 @@ async def test_trainer_can_update_business_detail(
     assert response.json()["role_detail"]["business_name"] == "New Name"
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "phone",
+        "school",
+        "jersey_number",
+        "emergency_contact_name",
+        "emergency_contact_phone",
+        "emergency_contact_relation",
+    ],
+)
+async def test_empty_string_for_a_nullable_field_is_rejected_with_422(
+    app_client: AsyncClient, db_session: AsyncSession, field: str
+) -> None:
+    """Constitution Principle VI, storage invariant: no nullable text
+    column may hold ''. A field-attributed 422 is the expected response,
+    not a silently persisted empty string."""
+    await _sign_in(app_client, db_session, UserRole.PLAYER_PARENT)
+
+    response = await app_client.patch("/me/profile", json={field: ""})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_failed"
+    assert any(f["field"] == field for f in response.json()["error"]["fields"])
+
+
+async def test_explicit_null_clears_a_nullable_column(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _sign_in(app_client, db_session, UserRole.PLAYER_PARENT)
+
+    seeded = await app_client.patch("/me/profile", json={"school": "Lincoln High"})
+    assert seeded.status_code == 200
+    assert seeded.json()["role_detail"]["school"] == "Lincoln High"
+
+    cleared = await app_client.patch("/me/profile", json={"school": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["role_detail"]["school"] is None
+
+    reread = await app_client.get("/me/profile")
+    assert reread.json()["role_detail"]["school"] is None
+
+
+async def test_omitted_key_leaves_the_column_unchanged(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _sign_in(app_client, db_session, UserRole.PLAYER_PARENT)
+
+    seeded = await app_client.patch("/me/profile", json={"school": "Lincoln High"})
+    assert seeded.status_code == 200
+
+    unrelated_update = await app_client.patch(
+        "/me/profile", json={"emergency_contact_name": "Jamie Guardian"}
+    )
+    assert unrelated_update.status_code == 200
+    assert unrelated_update.json()["role_detail"]["school"] == "Lincoln High"
+
+
+async def test_explicit_null_for_first_name_is_rejected_not_500(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _sign_in(app_client, db_session, UserRole.COACH)
+
+    response = await app_client.patch("/me/profile", json={"first_name": None})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "validation_failed"
+    assert any(f["field"] == "first_name" for f in body["error"]["fields"])
+
+
 async def test_player_parent_can_update_both_player_and_contact_fields(
     app_client: AsyncClient, db_session: AsyncSession
 ) -> None:

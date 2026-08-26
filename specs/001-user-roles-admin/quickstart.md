@@ -204,6 +204,28 @@ attendance and payment history.
 Scenario 5.10 is the one that most often fails in practice. Capture the totals **before** erasing —
 once erased, there is no way back to compare against.
 
+### US2/US3 re-walk after the bug-fix slice (2026-08-25)
+
+Re-run against the fixes in tasks.md's `## Fixes` section, by hand against a running server, to
+confirm no divergence from the table above:
+
+| # | Action | Observed |
+|---|---|---|
+| 2.6 | Create a Trainer, then create another account with the same email | 201, then 409 `email_already_registered` — unchanged |
+| 2.7 | Submit a malformed phone and a blank last name together | 422 naming both `phone` and `last_name` — the phone check is new (T167); it did not fire before this slice |
+| 3.2 (extended) | `PATCH /me/profile` with an optional field set, then cleared with `null`, then resubmitted as `""` | Set: 200; cleared: 200 with the field `null` in the response; `""`: 422 naming the field — the last two cases are new (T163–T166); previously `""` was accepted and persisted as an empty string |
+| 3.3 | Upload a photo, then fetch the returned `photo_url` with the session cookie | 200; the URL is API-relative and requires the auth cookie the same way every other admin/profile endpoint does — this is why the frontend must resolve it through `resolveMediaUrl` before use in an `<img>` (T159, T176) rather than pass it through unresolved |
+| 3.5 | Rename a `.txt` file to `.jpg` and upload | 415 — unchanged; still decodes bytes rather than trusting the extension or claimed content type |
+
+The directory search debounce (FR-063, SC-013) and back-navigation restoring the directory's filters
+(FR-061) are frontend-only behaviors with no curl equivalent; they are exercised end to end against
+the real router and real component tree — not mocked — by
+`frontend/tests/widgets/user-directory-table.test.tsx` and `frontend/tests/shared/back-button.test.tsx`
+respectively. Both passed as of this walkthrough.
+
+No divergence found between this table and the documented behaviour above it, once the bug-fix slice
+is applied.
+
 ---
 
 ## 5. Cross-cutting checks

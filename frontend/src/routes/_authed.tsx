@@ -1,6 +1,7 @@
 import { Outlet, createFileRoute, redirect } from '@tanstack/react-router'
 
 import { sessionQueryOptions } from '@/entities/session/api/use-session'
+import { AppShell } from '@/widgets/app-shell/ui/app-shell'
 
 /**
  * Layout route guarding every authenticated page. This is a rendering
@@ -20,5 +21,10 @@ export const Route = createFileRoute('/_authed')({
       })
     }
   },
-  component: () => <Outlet />,
+  component: () => (
+    <>
+      <AppShell />
+      <Outlet />
+    </>
+  ),
 })

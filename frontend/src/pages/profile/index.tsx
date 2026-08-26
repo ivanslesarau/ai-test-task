@@ -1,6 +1,7 @@
 import { useOwnProfile } from "@/entities/user/api/use-own-profile";
 import { EditProfileForm } from "@/features/profile/edit-own/ui/edit-profile-form";
 import { PhotoField } from "@/features/profile/edit-own/ui/photo-field";
+import { resolveMediaUrl } from "@/shared/api/media";
 import { ProfileFormShell } from "@/widgets/profile-form-shell/ui/profile-form-shell";
 
 export function ProfilePage() {
@@ -16,7 +17,10 @@ export function ProfilePage() {
   return (
     <ProfileFormShell
       title="My profile"
-      photo={<PhotoField photoUrl={profile.photo_url} initials={initials} />}
+      backTo="/"
+      photo={
+        <PhotoField photoUrl={resolveMediaUrl(profile.photo_url)} initials={initials} />
+      }
     >
       <p className="text-caption text-muted-foreground">{profile.email}</p>
       <EditProfileForm profile={profile} />

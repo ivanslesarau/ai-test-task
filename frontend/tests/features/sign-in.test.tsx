@@ -18,6 +18,16 @@ function renderForm(onSuccess: (user: unknown) => void) {
 }
 
 describe('SignInForm', () => {
+  it('shows no error text while typing, before the first submit', async () => {
+    renderForm(vi.fn())
+
+    await userEvent.type(screen.getByLabelText(/email/i), 'not-an-email')
+    await userEvent.click(screen.getByLabelText(/password/i))
+
+    expect(screen.queryByText(/valid email/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/email is required/i)).not.toBeInTheDocument()
+  })
+
   it('shows validation errors for an empty submission', async () => {
     const onSuccess = vi.fn()
     renderForm(onSuccess)

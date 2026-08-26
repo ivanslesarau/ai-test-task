@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +37,11 @@ class Settings(BaseSettings):
     smtp_username: str | None = None
     smtp_password: str | None = None
     smtp_from_address: str | None = None
+    # STARTTLS (587) is the common case; "implicit" reaches a relay on 465
+    # and "none" reaches a local dev sink like Mailpit/MailHog on 1025 —
+    # the previous hard-coded `start_tls=True` could reach none of those.
+    smtp_tls: Literal["starttls", "implicit", "none"] = "starttls"
+    smtp_timeout_seconds: int = 10
 
     frontend_base_url: str
 
@@ -45,6 +51,26 @@ class Settings(BaseSettings):
     @property
     def cookie_secure(self) -> bool:
         return self.app_env == "production"
+
+    @model_validator(mode="after")
+    def _smtp_settings_required_when_backend_is_smtp(self) -> "Settings":
+        # A misconfigured relay must fail at startup, not turn every
+        # invitation into a swallowed exception and a silent
+        # `invitation_sent: false` (T187).
+        if self.email_backend == "smtp":
+            missing = [
+                name
+                for name, value in (
+                    ("SMTP_HOST", self.smtp_host),
+                    ("SMTP_FROM_ADDRESS", self.smtp_from_address),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "EMAIL_BACKEND=smtp requires the following settings: " + ", ".join(missing)
+                )
+        return self
 
 
 @lru_cache

@@ -60,7 +60,7 @@ RESTRICTED_ROUTES: list[RestrictedRoute] = [
             "email": "matrix-probe@example.org",
             "first_name": "P",
             "last_name": "Q",
-            "phone": "+15551234567",
+            "phone": "+14155552671",
         },
     ),
     RestrictedRoute("GET", "/admin/users", {UserRole.SUPER_ADMIN}),

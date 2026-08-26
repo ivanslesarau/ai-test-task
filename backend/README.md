@@ -37,6 +37,9 @@ production. See `.env.example` for the full list with example values:
 | `SIGNIN_MAX_ATTEMPTS`, `SIGNIN_WINDOW_MINUTES` | Sign-in rate limiting |
 | `UPLOAD_DIR`, `MAX_UPLOAD_BYTES` | Profile photo storage |
 | `EMAIL_BACKEND`, `EMAIL_OUTBOX_DIR` | `filesystem` in development, `smtp` in production |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_ADDRESS` | `SMTP_HOST` and `SMTP_FROM_ADDRESS` become mandatory the moment `EMAIL_BACKEND=smtp` — the app refuses to start without them, rather than turning every invitation into a swallowed exception |
+| `SMTP_TLS` | `starttls` (587, the default) \| `implicit` (465) \| `none` (a local dev sink such as Mailpit/MailHog on 1025) |
+| `SMTP_TIMEOUT_SECONDS` | Connection timeout for the SMTP sender; default `10` |
 | `FRONTEND_BASE_URL` | Used to build links in outgoing email and for CORS |
 | `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD` | Read only by the `bootstrap-superadmin` CLI command, never by the API |
 

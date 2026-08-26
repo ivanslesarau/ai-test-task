@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
 
 import { useUiStore } from "@/app/store/ui-store";
@@ -12,6 +11,7 @@ import { ReinviteButton } from "@/features/admin/reinvite-user/ui/reinvite-butto
 import { Route as UsersIndexRoute } from "@/routes/_authed/admin/users.index";
 import { Route as UserDetailRoute } from "@/routes/_authed/admin/users.$userId";
 import type { UserRole } from "@/shared/api/types";
+import { BackButton } from "@/shared/ui/back-button";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -35,6 +35,7 @@ export function UsersIndexPage() {
 
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-6 p-6">
+      <BackButton fallbackTo="/" className="self-start" />
       <div className="flex items-center justify-between">
         <h1 className="text-section-title">Users</h1>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -109,9 +110,7 @@ export function UserDetailPage() {
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-4 p-6">
-      <Link to="/admin/users" className="text-body underline">
-        ← Back to directory
-      </Link>
+      <BackButton fallbackTo="/admin/users" className="self-start" />
       <h1 className="text-section-title">
         {user.first_name} {user.last_name}
       </h1>

@@ -1,8 +1,5 @@
-import pytest
-
-from app.core.errors import ValidationFailure
 from app.models.enums import UserRole
-from app.services.profile_service import _normalize_phone, editable_fields_for
+from app.services.profile_service import editable_fields_for
 
 
 def test_common_fields_are_editable_by_every_role() -> None:
@@ -32,13 +29,3 @@ def test_trainer_fields_are_role_specific() -> None:
     fields = editable_fields_for(UserRole.TRAINER)
     assert "business_name" in fields
     assert "bio" not in fields
-
-
-def test_normalize_phone_accepts_e164_and_reformats_us_local() -> None:
-    assert _normalize_phone("+14155552671") == "+14155552671"
-    assert _normalize_phone("4155552671") == "+14155552671"
-
-
-def test_normalize_phone_rejects_garbage() -> None:
-    with pytest.raises(ValidationFailure):
-        _normalize_phone("not-a-phone-number")

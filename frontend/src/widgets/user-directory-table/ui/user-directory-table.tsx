@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+
 import { Link, useNavigate } from '@tanstack/react-router'
 
 import { useUiStore } from '@/app/store/ui-store'
@@ -5,6 +7,7 @@ import { useUserDirectory } from '@/entities/user/api/use-users'
 import type { DirectorySearch } from '@/entities/user/model/directory-search'
 import { ReinviteButton } from '@/features/admin/reinvite-user/ui/reinvite-button'
 import type { AccountStatus, UserRole } from '@/shared/api/types'
+import { useDebouncedCallback } from '@/shared/lib/use-debounced-callback'
 import { Badge } from '@/shared/ui/badge'
 import { Button } from '@/shared/ui/button'
 import { Input } from '@/shared/ui/input'
@@ -46,8 +49,37 @@ export function UserDirectoryTable({ search }: UserDirectoryTableProps) {
   const { data, isLoading, isError } = useUserDirectory(search)
   const openPendingAction = useUiStore((state) => state.openPendingAction)
 
-  function updateSearch(patch: Partial<DirectorySearch>) {
-    void navigate({ search: (prev) => ({ ...prev, ...patch, page: patch.page ?? 1 }) })
+  // The URL stays the single source of truth for `q`
+  // (contracts/frontend-contracts.md §4) — this is local UI state for the
+  // input's own keystroke-by-keystroke value, not a second copy of the
+  // search term. It re-seeds from `search.q` whenever the URL changes out
+  // from under it (back/forward navigation, a role/status filter change).
+  const [searchTerm, setSearchTerm] = useState(search.q ?? '')
+
+  useEffect(() => {
+    setSearchTerm(search.q ?? '')
+  }, [search.q])
+
+  function updateSearch(patch: Partial<DirectorySearch>, options?: { replace?: boolean }) {
+    void navigate({
+      search: (prev) => ({ ...prev, ...patch, page: patch.page ?? 1 }),
+      replace: options?.replace ?? false,
+    })
+  }
+
+  // Debounced 500ms (interval decided by the user, 2026-08-25) and pushed
+  // with `replace: true`, so a 20-character search term leaves one history
+  // entry instead of twenty (FR-063, SC-013). Paging and the role/status
+  // filters below still call `updateSearch` directly, pushing a normal
+  // entry — those are deliberate steps a Super Admin should be able to
+  // reverse.
+  const debouncedPushSearchTerm = useDebouncedCallback((term: string) => {
+    updateSearch({ q: term.trim() === '' ? undefined : term }, { replace: true })
+  }, 500)
+
+  function handleSearchTermChange(value: string) {
+    setSearchTerm(value)
+    debouncedPushSearchTerm(value)
   }
 
   return (
@@ -56,8 +88,8 @@ export function UserDirectoryTable({ search }: UserDirectoryTableProps) {
         <Input
           aria-label="Search by name or email"
           placeholder="Search by name or email"
-          defaultValue={search.q ?? ''}
-          onChange={(event) => updateSearch({ q: event.target.value || undefined })}
+          value={searchTerm}
+          onChange={(event) => handleSearchTermChange(event.target.value)}
           className="max-w-xs"
         />
         <Select

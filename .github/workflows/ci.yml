@@ -84,3 +84,31 @@ jobs:
             echo "::error::axios imported outside shared/api"
             exit 1
           fi
+
+      # constitution Principle VI: exactly one empty-string-to-null
+      # normalizer exists, and every TanStack Form submit handler routes
+      # through it — a second normalizer, or an inline ternary/`|| null`
+      # at a submit call site, is the failure mode this catches.
+      - name: Every form submit handler uses the shared normalizer
+        run: |
+          missing=0
+          for f in $(grep -rl "onSubmit:" src/features --include=*.tsx); do
+            if ! grep -q "normalize-payload" "$f"; then
+              echo "::error file=$f::Submit handler does not import shared/lib/normalize-payload"
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            exit 1
+          fi
+
+          count=$(grep -rl "export function normalizeEmptyToNull" src | wc -l)
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Expected exactly one normalizeEmptyToNull definition, found $count"
+            exit 1
+          fi
+
+          if grep -rnE "\?\s*[a-zA-Z0-9_.\[\]'\"]+\s*:\s*null|\|\|\s*null" src/features --include=*.tsx; then
+            echo "::error::Inline empty-string-to-null conversion found at a submit call site — route through normalizeEmptyToNull instead"
+            exit 1
+          fi

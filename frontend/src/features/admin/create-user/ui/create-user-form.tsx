@@ -1,8 +1,9 @@
-import { useForm } from '@tanstack/react-form'
+import { revalidateLogic, useForm } from '@tanstack/react-form'
 
 import { useCreateUser } from '@/entities/user/api/use-users'
 import { createUserSchema } from '@/features/admin/create-user/model/schema'
-import { isApiError } from '@/shared/api/errors'
+import { fieldErrorText, toServerErrorMap } from '@/shared/lib/form-errors'
+import { normalizeEmptyToNull } from '@/shared/lib/normalize-payload'
 import type { CreatedUser, UserRole } from '@/shared/api/types'
 import { Button } from '@/shared/ui/button'
 import { FormItem, FormLabel, FormMessage } from '@/shared/ui/form-field'
@@ -38,24 +39,34 @@ export function CreateUserForm({ onSuccess }: CreateUserFormProps) {
       phone: '',
       business_name: '',
     },
-    validators: { onChange: createUserSchema },
+    validationLogic: revalidateLogic({ mode: 'submit', modeAfterSubmission: 'change' }),
+    validators: { onDynamic: createUserSchema },
     onSubmit: ({ value }) => {
+      const normalized = normalizeEmptyToNull(value)
       createUser.mutate(
         {
-          role: value.role,
-          email: value.email,
-          first_name: value.first_name,
-          last_name: value.last_name,
-          phone: value.phone,
-          ...(value.role === 'trainer' ? { business_name: value.business_name } : {}),
+          role: normalized.role,
+          email: normalized.email,
+          first_name: normalized.first_name,
+          last_name: normalized.last_name,
+          phone: normalized.phone,
+          ...(normalized.role === 'trainer' ? { business_name: normalized.business_name } : {}),
         },
-        { onSuccess },
+        {
+          onSuccess,
+          onError: (error) => {
+            // The `onServer` slot's type is only known once `useForm`'s
+            // dedicated type parameter is threaded through — nothing
+            // else about this form needs that, so the cast is scoped to
+            // this one call, against the setter's own parameter type.
+            form.setErrorMap({
+              onServer: toServerErrorMap(error),
+            } as unknown as Parameters<typeof form.setErrorMap>[0])
+          },
+        },
       )
     },
   })
-
-  const topLevelError =
-    createUser.isError && isApiError(createUser.error) ? createUser.error.message : null
 
   return (
     <form
@@ -63,6 +74,11 @@ export function CreateUserForm({ onSuccess }: CreateUserFormProps) {
         event.preventDefault()
         void form.handleSubmit()
       }}
+      // The browser's own constraint validation (e.g. for type="email")
+      // can block the submit event before React sees it once nothing
+      // validates on every keystroke; the Zod schema is the one source
+      // of truth for what renders (FR-057, FR-058).
+      noValidate
       className="flex flex-col gap-4"
     >
       <form.Field name="role">
@@ -99,7 +115,7 @@ export function CreateUserForm({ onSuccess }: CreateUserFormProps) {
               onBlur={field.handleBlur}
               onChange={(event) => field.handleChange(event.target.value)}
             />
-            <FormMessage>{field.state.meta.errors.map((e) => e?.message).join(', ')}</FormMessage>
+            <FormMessage>{fieldErrorText(field.state.meta.errors)}</FormMessage>
           </FormItem>
         )}
       </form.Field>
@@ -115,9 +131,7 @@ export function CreateUserForm({ onSuccess }: CreateUserFormProps) {
                 onBlur={field.handleBlur}
                 onChange={(event) => field.handleChange(event.target.value)}
               />
-              <FormMessage>
-                {field.state.meta.errors.map((e) => e?.message).join(', ')}
-              </FormMessage>
+              <FormMessage>{fieldErrorText(field.state.meta.errors)}</FormMessage>
             </FormItem>
           )}
         </form.Field>
@@ -132,9 +146,7 @@ export function CreateUserForm({ onSuccess }: CreateUserFormProps) {
                 onBlur={field.handleBlur}
                 onChange={(event) => field.handleChange(event.target.value)}
               />
-              <FormMessage>
-                {field.state.meta.errors.map((e) => e?.message).join(', ')}
-              </FormMessage>
+              <FormMessage>{fieldErrorText(field.state.meta.errors)}</FormMessage>
             </FormItem>
           )}
         </form.Field>
@@ -150,7 +162,7 @@ export function CreateUserForm({ onSuccess }: CreateUserFormProps) {
               onBlur={field.handleBlur}
               onChange={(event) => field.handleChange(event.target.value)}
             />
-            <FormMessage>{field.state.meta.errors.map((e) => e?.message).join(', ')}</FormMessage>
+            <FormMessage>{fieldErrorText(field.state.meta.errors)}</FormMessage>
           </FormItem>
         )}
       </form.Field>
@@ -168,9 +180,7 @@ export function CreateUserForm({ onSuccess }: CreateUserFormProps) {
                     onBlur={field.handleBlur}
                     onChange={(event) => field.handleChange(event.target.value)}
                   />
-                  <FormMessage>
-                    {field.state.meta.errors.map((e) => e?.message).join(', ')}
-                  </FormMessage>
+                  <FormMessage>{fieldErrorText(field.state.meta.errors)}</FormMessage>
                 </FormItem>
               )}
             </form.Field>
@@ -178,11 +188,16 @@ export function CreateUserForm({ onSuccess }: CreateUserFormProps) {
         }
       </form.Subscribe>
 
-      {topLevelError && <FormMessage>{topLevelError}</FormMessage>}
+      <form.Subscribe selector={(state) => state.errors}>
+        {(errors) => {
+          const message = fieldErrorText(errors)
+          return message ? <FormMessage>{message}</FormMessage> : null
+        }}
+      </form.Subscribe>
 
-      <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
-        {([canSubmit, isSubmitting]) => (
-          <Button type="submit" disabled={!canSubmit || isSubmitting}>
+      <form.Subscribe selector={(state) => state.isSubmitting}>
+        {(isSubmitting) => (
+          <Button type="submit" disabled={isSubmitting}>
             {isSubmitting ? 'Creating…' : 'Create user'}
           </Button>
         )}

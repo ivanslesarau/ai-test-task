@@ -60,6 +60,44 @@ describe('CreateUserForm', () => {
     await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1))
   })
 
+  it('shows no error text while typing, before the first submit', async () => {
+    renderForm(vi.fn())
+
+    await userEvent.type(screen.getByLabelText(/email/i), 'not-an-email')
+    await userEvent.click(screen.getByLabelText(/first name/i))
+
+    expect(screen.queryByText(/valid email/i)).not.toBeInTheDocument()
+  })
+
+  it('renders a 422 field error next to its own input', async () => {
+    server.use(
+      http.post('/api/v1/admin/users', () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: 'validation_failed',
+              message: 'One or more fields are invalid.',
+              fields: [{ field: 'phone', message: 'Enter a valid phone number.' }],
+            },
+          },
+          { status: 422 },
+        ),
+      ),
+    )
+    const onSuccess = vi.fn()
+    renderForm(onSuccess)
+
+    await selectRole('Coach')
+    await userEvent.type(screen.getByLabelText(/email/i), 'new-coach@example.org')
+    await userEvent.type(screen.getByLabelText(/first name/i), 'Cody')
+    await userEvent.type(screen.getByLabelText(/last name/i), 'Coach')
+    await userEvent.type(screen.getByLabelText(/phone/i), 'not-a-phone')
+    await userEvent.click(screen.getByRole('button', { name: /create user/i }))
+
+    expect(await screen.findByText(/enter a valid phone number/i)).toBeInTheDocument()
+    expect(onSuccess).not.toHaveBeenCalled()
+  })
+
   it('maps a 422 duplicate-email response onto a visible error', async () => {
     server.use(
       http.post('/api/v1/admin/users', () =>

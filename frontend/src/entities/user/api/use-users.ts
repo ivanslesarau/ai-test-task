@@ -60,14 +60,19 @@ export function useCreateUser() {
   })
 }
 
+export interface ReinviteResult {
+  invitation_sent: boolean
+  expires_at: string
+}
+
 export function useReinviteUser() {
   const queryClient = useQueryClient()
 
   return useMutation({
-    mutationFn: async (
-      userId: string,
-    ): Promise<{ invitation_sent: boolean; expires_at: string }> => {
-      const { data } = await apiClient.post(`/admin/users/${userId}/reinvite`)
+    mutationFn: async (userId: string): Promise<ReinviteResult> => {
+      // The explicit type parameter is load-bearing (constitution
+      // Principle II): without it, `data` infers as `any`.
+      const { data } = await apiClient.post<ReinviteResult>(`/admin/users/${userId}/reinvite`)
       return data
     },
     onSuccess: (_data, userId) => {

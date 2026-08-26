@@ -3,6 +3,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from app.core.errors import ValidationFailure
+from app.core.phone import normalize_phone
 from app.models.enums import UserRole
 from app.schemas.role_detail import RoleDetailOut
 
@@ -42,6 +44,20 @@ class CreateUserRequest(BaseModel):
         if _ERASURE_PLACEHOLDER_PATTERN.match(value):
             raise ValueError("This email address format is reserved and cannot be used.")
         return value
+
+    @field_validator("phone")
+    @classmethod
+    def _phone_is_valid_e164(cls, value: str) -> str:
+        # FR-022 and data-model.md §12 require the same phone-format rule
+        # on both write paths; app.core.phone is that one rule. Its
+        # `ValidationFailure` is the service-layer shape, so it is
+        # re-raised as a plain `ValueError` here — the shape a Pydantic
+        # field_validator understands and turns into a field-attributed
+        # 422 through FastAPI's own request-validation handling.
+        try:
+            return normalize_phone(value)
+        except ValidationFailure as exc:
+            raise ValueError(exc.fields.get("phone", exc.message)) from exc
 
 
 class UserSummary(BaseModel):

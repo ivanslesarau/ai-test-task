@@ -1,5 +1,3 @@
-import phonenumbers
-from phonenumbers import NumberParseException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -9,6 +7,7 @@ from app.core.errors import (
     UnsupportedMediaType,
     ValidationFailure,
 )
+from app.core.phone import normalize_phone
 from app.db.base import new_uuid, utcnow
 from app.models.enums import AccountStatus, UserRole
 from app.models.role_details import CoachDetail, TrainerOrganization
@@ -49,22 +48,6 @@ _ROLE_EDITABLE: dict[UserRole, frozenset[str]] = {
 
 def editable_fields_for(role: UserRole) -> frozenset[str]:
     return _COMMON_EDITABLE | _ROLE_EDITABLE[role]
-
-
-def _normalize_phone(raw: str) -> str:
-    try:
-        print(f"Normalizing phone number: {raw}")
-        parsed = phonenumbers.parse(raw, region=None)
-        print(f"Parsed phone number: {parsed}")
-    except NumberParseException as exc:
-        raise ValidationFailure(
-            "One or more fields are invalid.", fields={"phone": "Enter a valid phone number."}
-        ) from exc
-    if not phonenumbers.is_valid_number(parsed):
-        raise ValidationFailure(
-            "One or more fields are invalid.", fields={"phone": "Enter a valid phone number."}
-        )
-    return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
 
 
 class ProfileService:
@@ -116,7 +99,7 @@ class ProfileService:
             raise ValidationFailure("One or more fields are invalid.", fields=rejected)
 
         if "phone" in updates and updates["phone"] is not None:
-            updates["phone"] = _normalize_phone(str(updates["phone"]))
+            updates["phone"] = normalize_phone(str(updates["phone"]))
 
         profile = await self._users.get_profile(user.id)
         assert profile is not None

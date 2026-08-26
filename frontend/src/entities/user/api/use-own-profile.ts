@@ -42,9 +42,12 @@ export function useUploadOwnPhoto() {
     mutationFn: async (file: File): Promise<PhotoUrls> => {
       const formData = new FormData()
       formData.append('file', file)
-      const { data } = await apiClient.put<PhotoUrls>('/me/profile/photo', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
+      // No hand-set Content-Type: axios/the browser derive
+      // "multipart/form-data; boundary=..." from the FormData instance
+      // itself. A hard-coded header here carries no boundary, which is a
+      // trap the moment this runs through any adapter other than the one
+      // that happens to overwrite it (contracts/frontend-contracts.md §5).
+      const { data } = await apiClient.put<PhotoUrls>('/me/profile/photo', formData)
       return data
     },
     onSuccess: invalidate,

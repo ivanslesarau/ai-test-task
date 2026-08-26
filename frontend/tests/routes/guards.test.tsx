@@ -78,7 +78,10 @@ describe('route guards', () => {
 
     renderAt('/admin/users')
 
-    expect(await screen.findByText('Users')).toBeInTheDocument()
+    // The page heading and the shell's breadcrumb trail (T199-T203) both
+    // legitimately say "Users" now; the heading is the one this test cares
+    // about.
+    expect(await screen.findByRole('heading', { name: 'Users' })).toBeInTheDocument()
     expect(screen.queryByText(/don't have access/i)).not.toBeInTheDocument()
   })
 })
