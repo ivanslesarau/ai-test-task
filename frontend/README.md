@@ -63,6 +63,27 @@ genuinely dynamic, use `unknown` and a type guard or a narrowing cast with a com
 it's safe (see `entities/user/api/use-own-profile.ts` and its `field-values.ts` helper for an
 example: which fields exist is only known at runtime, from the server's `editable_fields` list).
 
+## Extension (2026-08-26): the `ctx` query-key namespace and branding
+
+Two conventions a contributor extending player-onboarding, multi-trainer, or branding work must
+follow, argued in `../specs/001-user-roles-admin/research.md` R-26 and R-27:
+
+- **Every query for data scoped to one trainer is keyed `['ctx', trainerId, ...]`** —
+  `entities/trainer-context/api/query-keys.ts`. This is the standing convention Epics 02-08 inherit;
+  a query for trainer-scoped data that doesn't begin with this namespace is a bug, not a style
+  choice. Switching context (`useSwitchTrainerContext`) removes the whole `['ctx']` subtree from the
+  cache *before* the session refetch resolves — reordering that is what would let one frame render
+  the previous trainer's data (FR-087).
+- **A logo renders through `<img>` only.** Never `<object>`, `<embed>`, or
+  `dangerouslySetInnerHTML` — an SVG loaded any other way can execute script in the viewer's
+  browser. `shared/lib/brand-palette.ts` derives the CSS custom properties
+  (`--brand-primary`/`-soft`/`-deep`/`-rgb`, matching `Task/designs/DESIGN_TOKENS.md`, plus a
+  WCAG-safe `--brand-surface`/`--brand-on-surface` pair the design tokens don't name) that
+  `widgets/branding-provider/` sets at `routes/_authed.tsx` and `routes/join.$code.tsx` — never at
+  `routes/__root.tsx`, which also carries `/login` and `/set-password`. A CI check greps for
+  `<object|<embed|dangerouslySetInnerHTML` near any file mentioning "branding" and fails the build if
+  one is found.
+
 ## Quality gates
 
 ```bash

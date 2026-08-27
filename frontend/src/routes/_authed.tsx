@@ -1,7 +1,8 @@
 import { Outlet, createFileRoute, redirect } from '@tanstack/react-router'
 
-import { sessionQueryOptions } from '@/entities/session/api/use-session'
+import { sessionQueryOptions, useSession } from '@/entities/session/api/use-session'
 import { AppShell } from '@/widgets/app-shell/ui/app-shell'
+import { BrandingProvider } from '@/widgets/branding-provider/ui/branding-provider'
 
 /**
  * Layout route guarding every authenticated page. This is a rendering
@@ -10,6 +11,17 @@ import { AppShell } from '@/widgets/app-shell/ui/app-shell'
  * visitor sees a redirect to sign-in instead of a page full of failed
  * requests.
  */
+function AuthedLayout() {
+  const { data: session } = useSession()
+
+  return (
+    <BrandingProvider branding={session?.portal_branding}>
+      <AppShell />
+      <Outlet />
+    </BrandingProvider>
+  )
+}
+
 export const Route = createFileRoute('/_authed')({
   beforeLoad: async ({ context, location }) => {
     try {
@@ -21,10 +33,5 @@ export const Route = createFileRoute('/_authed')({
       })
     }
   },
-  component: () => (
-    <>
-      <AppShell />
-      <Outlet />
-    </>
-  ),
+  component: AuthedLayout,
 })

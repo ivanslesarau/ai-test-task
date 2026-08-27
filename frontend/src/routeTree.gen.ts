@@ -15,6 +15,10 @@ import { Route as SetPasswordRouteImport } from './routes/set-password'
 import { Route as AuthedIndexRouteImport } from './routes/_authed/index'
 import { Route as AuthedAdminRouteImport } from './routes/_authed/admin'
 import { Route as AuthedProfileRouteImport } from './routes/_authed/profile'
+import { Route as AuthedTrainerRouteImport } from './routes/_authed/trainer'
+import { Route as JoinCodeRouteImport } from './routes/join.$code'
+import { Route as AuthedTrainerPlayersRouteImport } from './routes/_authed/trainer/players'
+import { Route as AuthedTrainerPortalRouteImport } from './routes/_authed/trainer/portal'
 import { Route as AuthedAdminUsersIndexRouteImport } from './routes/_authed/admin/users.index'
 import { Route as AuthedAdminUsersUserIdRouteImport } from './routes/_authed/admin/users.$userId'
 
@@ -47,6 +51,26 @@ const AuthedProfileRoute = AuthedProfileRouteImport.update({
   path: '/profile',
   getParentRoute: () => AuthedRoute,
 } as any)
+const AuthedTrainerRoute = AuthedTrainerRouteImport.update({
+  id: '/trainer',
+  path: '/trainer',
+  getParentRoute: () => AuthedRoute,
+} as any)
+const JoinCodeRoute = JoinCodeRouteImport.update({
+  id: '/join/$code',
+  path: '/join/$code',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthedTrainerPlayersRoute = AuthedTrainerPlayersRouteImport.update({
+  id: '/players',
+  path: '/players',
+  getParentRoute: () => AuthedTrainerRoute,
+} as any)
+const AuthedTrainerPortalRoute = AuthedTrainerPortalRouteImport.update({
+  id: '/portal',
+  path: '/portal',
+  getParentRoute: () => AuthedTrainerRoute,
+} as any)
 const AuthedAdminUsersIndexRoute = AuthedAdminUsersIndexRouteImport.update({
   id: '/users/',
   path: '/users/',
@@ -64,6 +88,10 @@ export interface FileRoutesByFullPath {
   '/set-password': typeof SetPasswordRoute
   '/admin': typeof AuthedAdminRouteWithChildren
   '/profile': typeof AuthedProfileRoute
+  '/trainer': typeof AuthedTrainerRouteWithChildren
+  '/join/$code': typeof JoinCodeRoute
+  '/trainer/players': typeof AuthedTrainerPlayersRoute
+  '/trainer/portal': typeof AuthedTrainerPortalRoute
   '/admin/users/$userId': typeof AuthedAdminUsersUserIdRoute
   '/admin/users/': typeof AuthedAdminUsersIndexRoute
 }
@@ -72,7 +100,11 @@ export interface FileRoutesByTo {
   '/set-password': typeof SetPasswordRoute
   '/admin': typeof AuthedAdminRouteWithChildren
   '/profile': typeof AuthedProfileRoute
+  '/trainer': typeof AuthedTrainerRouteWithChildren
+  '/join/$code': typeof JoinCodeRoute
   '/': typeof AuthedIndexRoute
+  '/trainer/players': typeof AuthedTrainerPlayersRoute
+  '/trainer/portal': typeof AuthedTrainerPortalRoute
   '/admin/users/$userId': typeof AuthedAdminUsersUserIdRoute
   '/admin/users': typeof AuthedAdminUsersIndexRoute
 }
@@ -83,7 +115,11 @@ export interface FileRoutesById {
   '/set-password': typeof SetPasswordRoute
   '/_authed/admin': typeof AuthedAdminRouteWithChildren
   '/_authed/profile': typeof AuthedProfileRoute
+  '/_authed/trainer': typeof AuthedTrainerRouteWithChildren
+  '/join/$code': typeof JoinCodeRoute
   '/_authed/': typeof AuthedIndexRoute
+  '/_authed/trainer/players': typeof AuthedTrainerPlayersRoute
+  '/_authed/trainer/portal': typeof AuthedTrainerPortalRoute
   '/_authed/admin/users/$userId': typeof AuthedAdminUsersUserIdRoute
   '/_authed/admin/users/': typeof AuthedAdminUsersIndexRoute
 }
@@ -95,6 +131,10 @@ export interface FileRouteTypes {
     | '/set-password'
     | '/admin'
     | '/profile'
+    | '/trainer'
+    | '/join/$code'
+    | '/trainer/players'
+    | '/trainer/portal'
     | '/admin/users/$userId'
     | '/admin/users/'
   fileRoutesByTo: FileRoutesByTo
@@ -103,7 +143,11 @@ export interface FileRouteTypes {
     | '/set-password'
     | '/admin'
     | '/profile'
+    | '/trainer'
+    | '/join/$code'
     | '/'
+    | '/trainer/players'
+    | '/trainer/portal'
     | '/admin/users/$userId'
     | '/admin/users'
   id:
@@ -113,7 +157,11 @@ export interface FileRouteTypes {
     | '/set-password'
     | '/_authed/admin'
     | '/_authed/profile'
+    | '/_authed/trainer'
+    | '/join/$code'
     | '/_authed/'
+    | '/_authed/trainer/players'
+    | '/_authed/trainer/portal'
     | '/_authed/admin/users/$userId'
     | '/_authed/admin/users/'
   fileRoutesById: FileRoutesById
@@ -122,6 +170,7 @@ export interface RootRouteChildren {
   AuthedRoute: typeof AuthedRouteWithChildren
   LoginRoute: typeof LoginRoute
   SetPasswordRoute: typeof SetPasswordRoute
+  JoinCodeRoute: typeof JoinCodeRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -168,6 +217,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedProfileRouteImport
       parentRoute: typeof AuthedRoute
     }
+    '/_authed/trainer': {
+      id: '/_authed/trainer'
+      path: '/trainer'
+      fullPath: '/trainer'
+      preLoaderRoute: typeof AuthedTrainerRouteImport
+      parentRoute: typeof AuthedRoute
+    }
+    '/join/$code': {
+      id: '/join/$code'
+      path: '/join/$code'
+      fullPath: '/join/$code'
+      preLoaderRoute: typeof JoinCodeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authed/trainer/players': {
+      id: '/_authed/trainer/players'
+      path: '/players'
+      fullPath: '/trainer/players'
+      preLoaderRoute: typeof AuthedTrainerPlayersRouteImport
+      parentRoute: typeof AuthedTrainerRoute
+    }
+    '/_authed/trainer/portal': {
+      id: '/_authed/trainer/portal'
+      path: '/portal'
+      fullPath: '/trainer/portal'
+      preLoaderRoute: typeof AuthedTrainerPortalRouteImport
+      parentRoute: typeof AuthedTrainerRoute
+    }
     '/_authed/admin/users/': {
       id: '/_authed/admin/users/'
       path: '/users'
@@ -199,15 +276,31 @@ const AuthedAdminRouteWithChildren = AuthedAdminRoute._addFileChildren(
   AuthedAdminRouteChildren,
 )
 
+interface AuthedTrainerRouteChildren {
+  AuthedTrainerPlayersRoute: typeof AuthedTrainerPlayersRoute
+  AuthedTrainerPortalRoute: typeof AuthedTrainerPortalRoute
+}
+
+const AuthedTrainerRouteChildren: AuthedTrainerRouteChildren = {
+  AuthedTrainerPlayersRoute: AuthedTrainerPlayersRoute,
+  AuthedTrainerPortalRoute: AuthedTrainerPortalRoute,
+}
+
+const AuthedTrainerRouteWithChildren = AuthedTrainerRoute._addFileChildren(
+  AuthedTrainerRouteChildren,
+)
+
 interface AuthedRouteChildren {
   AuthedAdminRoute: typeof AuthedAdminRouteWithChildren
   AuthedProfileRoute: typeof AuthedProfileRoute
+  AuthedTrainerRoute: typeof AuthedTrainerRouteWithChildren
   AuthedIndexRoute: typeof AuthedIndexRoute
 }
 
 const AuthedRouteChildren: AuthedRouteChildren = {
   AuthedAdminRoute: AuthedAdminRouteWithChildren,
   AuthedProfileRoute: AuthedProfileRoute,
+  AuthedTrainerRoute: AuthedTrainerRouteWithChildren,
   AuthedIndexRoute: AuthedIndexRoute,
 }
 
@@ -218,6 +311,7 @@ const rootRouteChildren: RootRouteChildren = {
   AuthedRoute: AuthedRouteWithChildren,
   LoginRoute: LoginRoute,
   SetPasswordRoute: SetPasswordRoute,
+  JoinCodeRoute: JoinCodeRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

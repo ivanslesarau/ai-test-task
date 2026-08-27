@@ -31,6 +31,12 @@ class ResizeObserverStub {
 }
 globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver
 
+// jsdom doesn't implement createObjectURL/revokeObjectURL, which
+// BrandingForm uses for a local logo preview before the file is saved
+// (FR-097).
+URL.createObjectURL = () => 'blob:mock-object-url'
+URL.revokeObjectURL = () => {}
+
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())

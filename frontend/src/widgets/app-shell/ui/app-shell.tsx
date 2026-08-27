@@ -4,6 +4,7 @@ import { Link } from "@tanstack/react-router";
 
 import { useSession } from "@/entities/session/api/use-session";
 import { useSignOut } from "@/features/auth/sign-out/api/use-sign-out";
+import { resolveMediaUrl } from "@/shared/api/media";
 import type { UserRole } from "@/shared/api/types";
 import {
   Breadcrumb,
@@ -16,6 +17,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import type { BreadcrumbCrumb } from "@/widgets/app-shell/model/use-breadcrumbs";
 import { useBreadcrumbs } from "@/widgets/app-shell/model/use-breadcrumbs";
+import { TrainerContextSwitcher } from "@/widgets/trainer-context-switcher/ui/trainer-context-switcher";
 
 const ROLE_LABEL: Record<UserRole, string> = {
   super_admin: "Super Admin",
@@ -82,9 +84,15 @@ export function AppShell() {
   const signOut = useSignOut();
   const crumbs = useBreadcrumbs();
 
+  const logoUrl = resolveMediaUrl(user?.portal_branding?.logo_url ?? null);
+
   return (
     <header className="flex flex-wrap items-center justify-between gap-4 border-b border-input px-6 py-4">
       <div className="flex items-center gap-3">
+        {logoUrl && (
+          // <img> only — never <object>/<embed>/inline SVG (research.md R-27).
+          <img src={logoUrl} alt="Portal logo" className="h-8 w-8 object-contain" />
+        )}
         {crumbs.length > 0 && (
           <Breadcrumb>
             <BreadcrumbList>
@@ -107,6 +115,7 @@ export function AppShell() {
 
       {user && (
         <div className="flex items-center gap-4">
+          {user.role === "player_parent" && <TrainerContextSwitcher />}
           <div className="text-right leading-tight">
             <p className="text-body">
               {user.first_name} {user.last_name}

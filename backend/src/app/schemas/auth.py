@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from app.schemas.branding import PortalBranding
+
 
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -20,6 +22,10 @@ class CurrentUser(BaseModel):
     first_name: str
     last_name: str
     photo_url: str | None
+    # Extension (2026-08-26): multi-trainer context and branding.
+    active_trainer_id: str | None
+    trainer_count: int
+    portal_branding: PortalBranding
 
 
 class InvitationCheckResponse(BaseModel):

@@ -273,6 +273,13 @@ three consecutive requests, an unfiltered first page in ~0.22 s, and a name/emai
 — all comfortably under the 3 s target, with no index or query changes needed beyond the
 `(status, role)` and `created_at` indexes already in `data-model.md` §2.
 
+**Measured** (2026-08-26, this machine, SQLite/WAL, in-process ASGI transport via
+`tests/integration/test_extension_timing.py`): accepting a second trainer's invitation
+(`POST /join/{code}/accept`, SC-016) completed in **~50 ms**, and switching active context
+(`PUT /me/trainer-context`, SC-018) completed in **~15 ms** — both comfortably under their 5 s and
+2 s targets. Neither path needed a dedicated index beyond the ones data-model.md §16–§19 already
+declare (`ix_tpa_player_status`, `ix_tpa_trainer_status`).
+
 ---
 
 ## 6. Quality gates

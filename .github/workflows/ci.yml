@@ -46,6 +46,18 @@ jobs:
             exit 1
           fi
 
+      # research.md R-25: context is resolved server-side from the
+      # caller's own row via get_trainer_context — no endpoint accepts a
+      # trainer_id request parameter to select it (the admin user
+      # directory's {user_id} path param is a different, pre-existing
+      # concept and is excluded).
+      - name: No trainer_id request parameter outside the admin router
+        run: |
+          if grep -rn "trainer_id" src/app/api/ | grep -v "admin_users_router" | grep "Query\|Path("; then
+            echo "::error::A trainer_id request parameter was found outside admin_users_router — context must be server-resolved (research.md R-25)"
+            exit 1
+          fi
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -110,5 +122,16 @@ jobs:
 
           if grep -rnE "\?\s*[a-zA-Z0-9_.\[\]'\"]+\s*:\s*null|\|\|\s*null" src/features --include=*.tsx; then
             echo "::error::Inline empty-string-to-null conversion found at a submit call site — route through normalizeEmptyToNull instead"
+            exit 1
+          fi
+
+      # research.md R-27: a logo is rendered through <img> only. <object>,
+      # <embed>, and inline SVG (dangerouslySetInnerHTML) all let an SVG
+      # execute script in the browser — the layer of defence that must
+      # hold even if the backend's screening is wrong.
+      - name: Logos are rendered through <img> only
+        run: |
+          if grep -rn "branding" src --include=*.tsx | grep -E "<object|<embed|dangerouslySetInnerHTML"; then
+            echo "::error::A logo appears to be rendered outside <img> — see research.md R-27"
             exit 1
           fi

@@ -5,6 +5,7 @@ from sqlalchemy import CursorResult, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utcnow
+from app.models.association import LinkLookupAttempt
 from app.models.auth import Session as SessionModel
 from app.models.auth import SignInAttempt
 
@@ -13,6 +14,9 @@ from app.models.auth import SignInAttempt
 # existed (data-model.md §5) — this is how long "briefly" is.
 _SESSION_RETENTION = timedelta(days=1)
 _SIGN_IN_ATTEMPT_RETENTION = timedelta(days=30)
+# Same retention as sign_in_attempts — both back a sliding-window
+# throttle over the same 15-minute window (research.md R-30).
+_LINK_LOOKUP_ATTEMPT_RETENTION = timedelta(days=30)
 
 
 class MaintenanceService:
@@ -43,6 +47,16 @@ class MaintenanceService:
             CursorResult,
             await self._session.execute(
                 delete(SignInAttempt).where(SignInAttempt.attempted_at < cutoff)
+            ),
+        )
+        return result.rowcount
+
+    async def prune_old_link_lookup_attempts(self) -> int:
+        cutoff = utcnow() - _LINK_LOOKUP_ATTEMPT_RETENTION
+        result = cast(
+            CursorResult,
+            await self._session.execute(
+                delete(LinkLookupAttempt).where(LinkLookupAttempt.attempted_at < cutoff)
             ),
         )
         return result.rowcount

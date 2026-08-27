@@ -15,6 +15,16 @@ export interface CurrentUser {
   first_name: string
   last_name: string
   photo_url: string | null
+  /** Player/Parent only; null for every other role and for a player who
+   * belongs to no trainer (extension 2026-08-26, FR-086). */
+  active_trainer_id: string | null
+  /** How many switchable trainers the caller has. Zero for every
+   * non-player role. The switcher renders only above one (FR-088). */
+  trainer_count: number
+  /** Resolved server-side per FR-101 — a trainer's own, a player's
+   * active context's, or the platform default. Coaches receive the
+   * default until US-01.08 (research.md R-33). */
+  portal_branding: PortalBranding
 }
 
 export interface TrainerDetail {
@@ -179,4 +189,94 @@ export interface ErasureRecord {
 export interface LoginRequest {
   email: string
   password: string
+}
+
+// -----------------------------------------------------------------------
+// Extension (2026-08-26): ShareLink onboarding, multi-trainer, branding
+// Mirrors contracts/openapi.yaml v1.1.0.
+// -----------------------------------------------------------------------
+
+export type Gender = 'male' | 'female' | 'other' | 'prefer_not_to_say'
+export type ShareLinkKind = 'player_standing' | 'coach_single_use'
+
+export interface PortalBranding {
+  logo_url: string | null
+  primary_color: string | null
+  updated_at: string | null
+}
+
+export interface PortalBrandingUpdate {
+  primary_color?: string | null
+}
+
+export interface ShareLink {
+  id: string
+  code: string
+  url: string
+  kind: ShareLinkKind
+  is_active: boolean
+  use_count: number
+  expires_at: string | null
+  max_uses: number | null
+  created_at: string
+}
+
+export type JoinViewerState = 'anonymous' | 'can_join' | 'already_associated' | 'role_cannot_join'
+
+export interface JoinLinkPreview {
+  trainer_display_name: string
+  branding: PortalBranding
+  viewer: { state: JoinViewerState }
+}
+
+export interface JoinRegistrationRequest {
+  first_name: string
+  last_name: string
+  email: string
+  password: string
+  phone: string
+  is_self: boolean
+  player_name: string | null
+  date_of_birth: string
+  gender: Gender
+}
+
+export interface JoinResult {
+  trainer_id: string
+  trainer_display_name: string
+  already_associated: boolean
+  active_trainer_id: string
+}
+
+export interface TrainerContextEntry {
+  trainer_id: string
+  display_name: string
+  branding: PortalBranding
+  joined_at: string
+}
+
+export interface TrainerContextList {
+  active_trainer_id: string | null
+  trainers: TrainerContextEntry[]
+}
+
+export interface TrainerContextRequest {
+  trainer_id: string
+}
+
+export interface TrainerPlayerSummary {
+  player_user_id: string
+  display_name: string
+  is_self: boolean
+  age: number | null
+  gender: string | null
+  joined_at: string
+  photo_url: string | null
+}
+
+export interface TrainerPlayerPage {
+  items: TrainerPlayerSummary[]
+  page: number
+  page_size: number
+  total: number
 }

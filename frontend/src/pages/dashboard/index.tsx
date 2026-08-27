@@ -11,9 +11,21 @@ function RoleContent({ user }: { user: CurrentUser }) {
           Go to the user directory
         </Link>
       );
+    case "player_parent":
+      // A player with no association is a valid state (research.md
+      // R-24), not an error — a Super Admin-created account, or one
+      // whose only trainer was deactivated (FR-089).
+      if (user.trainer_count === 0) {
+        return (
+          <p className="text-muted-foreground">
+            You&apos;re not currently connected to a trainer. Ask them for their invitation
+            link.
+          </p>
+        );
+      }
+      return <p className="text-muted-foreground">Welcome back.</p>;
     case "trainer":
     case "coach":
-    case "player_parent":
       // Each role's own dashboard content is built by later epics; this
       // feature only establishes the landing shell and role branching.
       return <p className="text-muted-foreground">Welcome back.</p>;

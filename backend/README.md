@@ -14,8 +14,9 @@ Requires Python 3.13+.
 cd backend
 uv sync                          # or: python -m venv .venv && pip install -e ".[dev]"
 cp .env.example .env             # then edit — see Environment variables below
-uv run alembic upgrade head      # creates the SQLite file and all 9 tables
+uv run alembic upgrade head      # creates the SQLite file and all 12 tables
 uv run python -m app.cli bootstrap-superadmin   # the only account that cannot be created via the API
+uv run python -m app.cli seed-demo-trainer      # a Trainer with a printed join URL, for testing US6 locally
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
@@ -68,6 +69,31 @@ equivalent exists for them:
 
 A CI check (`.github/workflows/ci.yml`) greps for any raw `.execute("...")` call outside
 `db/engine.py` and fails the build if one is found.
+
+## Extension (2026-08-26): ShareLink onboarding, multi-trainer, branding
+
+Three rules a contributor touching this code must know, argued in full in
+`../specs/001-user-roles-admin/research.md` R-21 – R-33:
+
+- **A ShareLink's `code` is stored in clear, not hashed** — unlike every other token in this
+  codebase (sessions, setup invitations). The trainer must be able to read it back at any time
+  (`GET /me/share-link`), and the link is designed to be published on a flyer. Do not "fix" this to
+  match the other tokens' hashing pattern.
+- **No endpoint accepts a `trainer_id` request parameter to select context.** A Player/Parent's
+  active trainer is resolved server-side, on their own account, through
+  `core/deps.py::get_trainer_context` / `TrainerContextService.resolve_active_trainer_id`. A CI
+  check greps for this outside `admin_users_router` and fails the build if one appears.
+- **A trainer's portal logo is served unauthenticated** at `GET /media/branding/{key}` — unlike
+  profile photos — because the public join page must show a trainer's branding before anyone has an
+  account (FR-073). SVG uploads are screened in `services/svg_screening.py` (stdlib only, no new
+  dependency) and served with `X-Content-Type-Options: nosniff` and a locked-down CSP; the frontend
+  must render every logo through `<img>` only, never `<object>`/`<embed>`/inline SVG. A second CI
+  check greps for that.
+
+`FR-101`'s promise that a trainer's branding reaches their coaches is **not fully implemented**:
+which trainer a coach works for is US-01.08, out of scope for this feature, so a coach currently
+sees the platform default. `services/branding_service.py::resolve_for_viewer` carries a
+`TODO(US-01.08)` at the exact line that changes once that link exists.
 
 ## Quality gates
 

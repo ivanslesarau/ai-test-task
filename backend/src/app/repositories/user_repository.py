@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import date
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +29,23 @@ class NewAccountInput:
     last_name: str
     phone: str
     business_name: str | None = None
+
+
+@dataclass
+class NewJoinRegistrationInput:
+    """A registration through a ShareLink (FR-074, extension 2026-08-26).
+    Always role Player/Parent — the join flow admits no other role."""
+
+    email: str
+    password_hash: str
+    first_name: str
+    last_name: str
+    phone: str
+    is_self: bool
+    player_name: str | None
+    date_of_birth: date
+    gender: str
+    active_trainer_user_id: str
 
 
 class UserRepository:
@@ -118,6 +136,55 @@ class UserRepository:
         elif data.role is UserRole.PLAYER_PARENT:
             self._session.add(PlayerDetail(user_id=user.id))
             self._session.add(ParentContact(user_id=user.id))
+
+        await self._session.flush()
+        return user
+
+    async def insert_join_registration(self, data: NewJoinRegistrationInput) -> User:
+        """Creates the account, profile, player detail, and an empty
+        parent-contact row for a registration through a ShareLink
+        (extension 2026-08-26, FR-074). Mirrors insert_account's shape
+        for the Player/Parent branch, with the extension's five
+        player_details columns set from the registration form.
+
+        Added to the session but not flushed to commit — the caller
+        (JoinService) creates the association and session in the same
+        transaction, so a failure anywhere leaves nothing behind
+        (FR-083)."""
+        now = utcnow()
+        user = User(
+            id=new_uuid(),
+            email=data.email.lower(),
+            password_hash=data.password_hash,
+            role=UserRole.PLAYER_PARENT.value,
+            status=AccountStatus.ACTIVE.value,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        self._session.add(user)
+        await self._session.flush()
+
+        self._session.add(
+            UserProfile(
+                user_id=user.id,
+                first_name=data.first_name,
+                last_name=data.last_name,
+                phone=data.phone,
+                updated_at=now,
+            )
+        )
+        self._session.add(
+            PlayerDetail(
+                user_id=user.id,
+                player_name=data.player_name,
+                date_of_birth=data.date_of_birth,
+                gender=data.gender,
+                is_self=data.is_self,
+                active_trainer_user_id=data.active_trainer_user_id,
+            )
+        )
+        self._session.add(ParentContact(user_id=user.id))
 
         await self._session.flush()
         return user

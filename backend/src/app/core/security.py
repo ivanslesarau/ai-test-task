@@ -25,3 +25,12 @@ def generate_token() -> str:
 
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def generate_share_link_code() -> str:
+    """A URL-safe code for a trainer's ShareLink, stored **in clear** —
+    unlike every other secret in this module. FR-069 requires the trainer
+    to read the code back at any time, which a hash makes impossible, and
+    the link is designed to be published on a flyer (research.md R-21).
+    128 bits of entropy in 22 characters is the floor FR-066 requires."""
+    return secrets.token_urlsafe(16)

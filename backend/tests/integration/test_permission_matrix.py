@@ -88,6 +88,27 @@ RESTRICTED_ROUTES: list[RestrictedRoute] = [
         json_body={"version": 1, "reason": "matrix probe"},
     ),
     RestrictedRoute("GET", "/admin/erasure-records/{user_id}", {UserRole.SUPER_ADMIN}),
+    # Extension (2026-08-26) — US6: a trainer's own ShareLink.
+    RestrictedRoute("GET", "/me/share-link", {UserRole.TRAINER}),
+    RestrictedRoute("POST", "/me/share-link/regenerate", {UserRole.TRAINER}),
+    RestrictedRoute("GET", "/trainer/players", {UserRole.TRAINER}),
+    # Extension — US7: multi-trainer context is Player/Parent-only.
+    RestrictedRoute("GET", "/me/trainers", {UserRole.PLAYER_PARENT}),
+    RestrictedRoute(
+        "PUT",
+        "/me/trainer-context",
+        {UserRole.PLAYER_PARENT},
+        json_body={"trainer_id": "nonexistent"},
+    ),
+    # Extension — US8: portal branding is Trainer-only. The two
+    # multipart logo endpoints (PUT/DELETE /me/branding/logo) aren't
+    # expressible through this table's json_body shape and are covered
+    # directly in test_branding_logo.py instead.
+    RestrictedRoute("GET", "/me/branding", {UserRole.TRAINER}),
+    RestrictedRoute(
+        "PATCH", "/me/branding", {UserRole.TRAINER}, json_body={"primary_color": "#3366cc"}
+    ),
+    RestrictedRoute("POST", "/me/branding/reset", {UserRole.TRAINER}),
 ]
 
 
@@ -189,3 +210,47 @@ def test_every_admin_route_is_present_in_the_matrix() -> None:
 
     missing = discovered - covered
     assert not missing, f"/admin routes with no permission-matrix entry: {missing}"
+
+
+# Extension (2026-08-26): role-agnostic routes every signed-in person may
+# reach — not restricted, so they carry no RESTRICTED_ROUTES entry.
+_ROLE_AGNOSTIC_ROUTES = {("GET", "/me/profile"), ("PATCH", "/me/profile")}
+
+# The two multipart logo endpoints aren't expressible through
+# RestrictedRoute's json_body shape (see the comment beside their
+# omission from RESTRICTED_ROUTES above); covered directly in
+# test_branding_logo.py instead.
+_MULTIPART_ROUTES = {("PUT", "/me/branding/logo"), ("DELETE", "/me/branding/logo")}
+
+# /me/profile/photo is likewise multipart (PUT) and role-agnostic (every
+# role); DELETE has no body and needs no json_body entry either way.
+_MULTIPART_ROUTES |= {("PUT", "/me/profile/photo"), ("DELETE", "/me/profile/photo")}
+
+
+def test_every_me_and_trainer_route_is_present_in_the_matrix_or_accounted_for() -> None:
+    """The extension's counterpart to test_every_admin_route_is_present_
+    in_the_matrix — /me/* and /trainer/* routes this feature adds are
+    role-gated exactly like /admin/*, and a new one must not ship
+    unguarded either."""
+    from app.main import app
+
+    schema = app.openapi()
+    discovered: set[tuple[str, str]] = {
+        (method.upper(), path.removeprefix("/api/v1"))
+        for path, methods in schema["paths"].items()
+        if path.startswith("/api/v1/me/") or path.startswith("/api/v1/trainer/")
+        for method in methods
+        if method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+    }
+    assert discovered, (
+        "no /me or /trainer routes were discovered — the discovery mechanism is broken"
+    )
+
+    covered = {(r.method, r.path_template) for r in RESTRICTED_ROUTES}
+    accounted_for = covered | _ROLE_AGNOSTIC_ROUTES | _MULTIPART_ROUTES
+
+    missing = discovered - accounted_for
+    assert not missing, (
+        f"/me or /trainer routes with no permission-matrix entry and no documented "
+        f"exclusion: {missing}"
+    )

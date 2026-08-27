@@ -8,6 +8,14 @@ export function isSuperAdmin(user: CurrentUser | undefined): boolean {
   return hasRole(user, 'super_admin')
 }
 
+export function isTrainer(user: CurrentUser | undefined): boolean {
+  return hasRole(user, 'trainer')
+}
+
+export function isPlayerParent(user: CurrentUser | undefined): boolean {
+  return hasRole(user, 'player_parent')
+}
+
 export function landingPathForRole(role: UserRole): string {
   // Every role currently lands on the same dashboard shell, which branches
   // its content by role internally (T067). A distinct path per role can be

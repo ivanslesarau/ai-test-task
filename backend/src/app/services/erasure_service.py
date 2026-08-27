@@ -9,6 +9,7 @@ from app.repositories.audit_repository import AuditRepository
 from app.repositories.erasure_repository import ErasureRepository
 from app.repositories.invitation_repository import InvitationRepository
 from app.repositories.session_repository import SessionRepository
+from app.repositories.share_link_repository import ShareLinkRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.admin_user import AuditActorOut, ErasureRecordOut, UserDetail
 from app.services.ports.photo_storage import PhotoStorage, thumbnail_key_for
@@ -36,6 +37,7 @@ class ErasureService:
         self._invitations = InvitationRepository(db_session)
         self._erasure = ErasureRepository(db_session)
         self._audit = AuditRepository(db_session)
+        self._share_links = ShareLinkRepository(db_session)
         self._photo_storage = photo_storage
         self._admin_service = admin_service
 
@@ -87,11 +89,15 @@ class ErasureService:
         profile.photo_key = None
         profile.updated_at = utcnow()
 
-        await self._anonymize_role_detail(user)
+        logo_key = await self._anonymize_role_detail(user)
 
         if photo_key:
             await self._photo_storage.delete(photo_key)
             await self._photo_storage.delete(thumbnail_key_for(photo_key))
+        if logo_key:
+            # A logo identifies the business as directly as its name
+            # (data-model.md §20) — unlike business_name, it is removed.
+            await self._photo_storage.delete(logo_key)
 
         await self._sessions.revoke_all_for_user(user.id)
         await self._invitations.supersede_outstanding_for_user(user.id)
@@ -113,18 +119,33 @@ class ErasureService:
 
         return await self._admin_service.get_user(user.id)
 
-    async def _anonymize_role_detail(self, user: User) -> None:
+    async def _anonymize_role_detail(self, user: User) -> str | None:
+        """Returns the trainer's logo key to delete from storage, if any
+        (data-model.md §20). Every other side effect happens in place."""
         detail = await self._users.get_role_detail(user)
         role = user.role_enum
 
         if role is UserRole.TRAINER and isinstance(detail, TrainerOrganization):
-            # business_name deliberately survives — see data-model.md §10's
-            # note: it is the entity later epics' revenue and roster
-            # records attribute to, and clearing it would make historical
-            # organizational reporting unreadable (FR-047).
+            # business_name and primary_color deliberately survive — see
+            # data-model.md §10/§20's note: business_name is the entity
+            # later epics' revenue and roster records attribute to, and a
+            # colour identifies nobody. The logo does identify the
+            # business, so it is cleared (its file removed by the caller).
             detail.address = None
             detail.website = None
             detail.description = None
+            logo_key = detail.logo_key
+            detail.logo_key = None
+            detail.branding_updated_at = utcnow()
+
+            # The trainer is gone — every standing link must stop
+            # admitting anyone (FR-070), while associations it already
+            # produced stay untouched (FR-069).
+            current_link = await self._share_links.get_current_for_trainer(user.id)
+            if current_link is not None:
+                await self._share_links.revoke(current_link)
+
+            return logo_key
         elif role is UserRole.COACH and isinstance(detail, CoachDetail):
             detail.bio = None
             detail.credentials = None
@@ -134,12 +155,21 @@ class ErasureService:
             player, parent = detail
             player.school = None
             player.jersey_number = None
-            # player.skill_level deliberately survives — a classification,
-            # not an identifier, and reporting distributions depend on it.
+            # player.skill_level and player.gender deliberately survive —
+            # classifications, not identifiers, and reporting
+            # distributions depend on them. is_self is unchanged for the
+            # same reason. player_name and date_of_birth are identifying
+            # and are cleared; active_trainer_user_id is cleared because
+            # an erased account has no context to be in (data-model.md §20).
+            player.player_name = None
+            player.date_of_birth = None
+            player.active_trainer_user_id = None
             if parent is not None:
                 parent.emergency_contact_name = None
                 parent.emergency_contact_phone = None
                 parent.emergency_contact_relation = None
+
+        return None
 
     async def get_erasure_record(self, user_id: str) -> ErasureRecordOut:
         record = await self._erasure.get_for_user(user_id)

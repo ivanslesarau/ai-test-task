@@ -20,4 +20,9 @@ export const userKeys = {
   detail: (userId: string) => ['users', 'detail', userId] as const,
   audit: (userId: string, page: number) => ['users', 'audit', userId, page] as const,
   erasureRecord: (userId: string) => ['users', 'erasure', userId] as const,
+  // Extension (2026-08-26) — a trainer's own keys, not context-scoped
+  // (contracts/frontend-contracts.md §9).
+  trainers: ['users', 'me', 'trainers'] as const,
+  shareLink: ['users', 'me', 'share-link'] as const,
+  branding: ['users', 'me', 'branding'] as const,
 } as const

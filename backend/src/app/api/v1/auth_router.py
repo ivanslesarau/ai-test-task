@@ -2,7 +2,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Request, Response
 
-from app.core.deps import AuthServiceDep, CurrentUserDep, SettingsDep
+from app.core.deps import (
+    AuthServiceDep,
+    BrandingServiceDep,
+    CurrentUserDep,
+    SettingsDep,
+    TrainerContextServiceDep,
+)
+from app.models.enums import UserRole
 from app.models.user import User
 from app.schemas.auth import (
     CurrentUser,
@@ -10,6 +17,8 @@ from app.schemas.auth import (
     LoginRequest,
     SetupPasswordRequest,
 )
+from app.services.branding_service import BrandingService
+from app.services.trainer_context_service import TrainerContextService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -30,8 +39,24 @@ def _set_session_cookie(response: Response, *, token: str, settings: SettingsDep
     )
 
 
-def _to_current_user(user: User) -> CurrentUser:
+async def _to_current_user(
+    user: User,
+    trainer_context_service: TrainerContextService,
+    branding_service: BrandingService,
+) -> CurrentUser:
     photo_url = f"/media/photos/{user.profile.photo_key}" if user.profile.photo_key else None
+
+    active_trainer_id: str | None = None
+    trainer_count = 0
+    if user.role_enum is UserRole.PLAYER_PARENT:
+        # One call resolves-and-repairs the context and lists it
+        # (research.md R-24) — no second query for the count.
+        contexts = await trainer_context_service.list_for_player(user)
+        active_trainer_id = contexts.active_trainer_id
+        trainer_count = len(contexts.trainers)
+
+    portal_branding = await branding_service.resolve_for_viewer(user)
+
     return CurrentUser(
         id=user.id,
         email=user.email,
@@ -40,6 +65,9 @@ def _to_current_user(user: User) -> CurrentUser:
         first_name=user.profile.first_name,
         last_name=user.profile.last_name,
         photo_url=photo_url,
+        active_trainer_id=active_trainer_id,
+        trainer_count=trainer_count,
+        portal_branding=portal_branding,
     )
 
 
@@ -50,12 +78,14 @@ async def login(
     response: Response,
     auth_service: AuthServiceDep,
     settings: SettingsDep,
+    trainer_context_service: TrainerContextServiceDep,
+    branding_service: BrandingServiceDep,
 ) -> CurrentUser:
     user, raw_token = await auth_service.sign_in(
         email=body.email, password=body.password, client_ip=_client_ip(request)
     )
     _set_session_cookie(response, token=raw_token, settings=settings)
-    return _to_current_user(user)
+    return await _to_current_user(user, trainer_context_service, branding_service)
 
 
 @router.post("/logout", status_code=204)
@@ -71,8 +101,12 @@ async def logout(
 
 
 @router.get("/session", response_model=CurrentUser)
-async def get_session(user: CurrentUserDep) -> CurrentUser:
-    return _to_current_user(user)
+async def get_session(
+    user: CurrentUserDep,
+    trainer_context_service: TrainerContextServiceDep,
+    branding_service: BrandingServiceDep,
+) -> CurrentUser:
+    return await _to_current_user(user, trainer_context_service, branding_service)
 
 
 @router.get("/setup-password/{token}", response_model=InvitationCheckResponse)

@@ -86,3 +86,14 @@ class PayloadTooLarge(DomainError):
 class UnsupportedMediaType(DomainError):
     """An uploaded file did not decode as one of the accepted image
     formats (FR-034, R-07)."""
+
+
+class InvitationLinkInvalid(DomainError):
+    """An invitation link that is unknown, revoked, expired, exhausted, or
+    whose owning trainer is not Active (FR-070). One message for all five
+    causes — the caller must not be able to tell which applies."""
+
+
+class RoleCannotJoin(DomainError):
+    """A signed-in caller whose role is not Player/Parent attempted to
+    join a trainer through a player invitation link (FR-081)."""

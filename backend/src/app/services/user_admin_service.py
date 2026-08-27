@@ -20,6 +20,7 @@ from app.schemas.admin_user import (
 )
 from app.schemas.role_detail import build_role_detail_out
 from app.services.ports.email_sender import EmailSender
+from app.services.share_link_service import ShareLinkService
 from app.services.templates.invitation import render_invitation_email
 
 
@@ -61,6 +62,7 @@ class UserAdminService:
         self._invitations = InvitationRepository(db_session)
         self._audit = AuditRepository(db_session)
         self._sessions = SessionRepository(db_session)
+        self._share_links = ShareLinkService(db_session, settings)
 
     async def create_user(
         self,
@@ -90,6 +92,13 @@ class UserAdminService:
                 business_name=business_name,
             )
         )
+
+        if role is UserRole.TRAINER:
+            # In the same transaction as the account (research.md R-22) —
+            # a lazily-created link would turn a later GET into a write
+            # and risk the SQLite write-lock contending with an
+            # administrative action already holding it.
+            await self._share_links.issue_standing_link(user.id)
 
         await self._audit.add(
             action="user_created",

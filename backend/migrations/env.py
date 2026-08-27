@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # unimported model produces a silently empty revision.
 from app.core.config import get_settings
 from app.db.base import Base
-from app.models import audit, auth, role_details, user  # noqa: F401
+from app.models import association, audit, auth, role_details, share_link, user  # noqa: F401
 
 config = context.config
 

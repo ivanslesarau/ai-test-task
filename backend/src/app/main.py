@@ -5,19 +5,28 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.v1 import admin_users_router, auth_router, me_router, media_router
+from app.api.v1 import (
+    admin_users_router,
+    auth_router,
+    join_router,
+    me_router,
+    media_router,
+    trainer_router,
+)
 from app.core.config import get_settings
 from app.core.errors import (
     AccountNotActive,
     ActionNotPermitted,
     Conflict,
     InvalidCredentials,
+    InvitationLinkInvalid,
     InvitationNotUsable,
     NotAuthenticated,
     NotFound,
     PayloadTooLarge,
     PermissionDenied,
     RateLimited,
+    RoleCannotJoin,
     StaleVersion,
     UnsupportedMediaType,
     ValidationFailure,
@@ -115,6 +124,14 @@ def create_app() -> FastAPI:
     async def _unsupported_media_type(_: Request, exc: UnsupportedMediaType) -> JSONResponse:
         return JSONResponse(status_code=415, content=_error("unsupported_image", exc.message))
 
+    @app.exception_handler(InvitationLinkInvalid)
+    async def _invitation_link_invalid(_: Request, exc: InvitationLinkInvalid) -> JSONResponse:
+        return JSONResponse(status_code=404, content=_error("invitation_link_invalid", exc.message))
+
+    @app.exception_handler(RoleCannotJoin)
+    async def _role_cannot_join(_: Request, exc: RoleCannotJoin) -> JSONResponse:
+        return JSONResponse(status_code=403, content=_error("role_cannot_join", exc.message))
+
     @app.exception_handler(RequestValidationError)
     async def _request_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
         """Pydantic-level request parsing errors (malformed email, missing
@@ -154,6 +171,8 @@ def create_app() -> FastAPI:
     app.include_router(me_router.router, prefix="/api/v1")
     app.include_router(admin_users_router.router, prefix="/api/v1")
     app.include_router(media_router.router, prefix="/api/v1")
+    app.include_router(join_router.router, prefix="/api/v1")
+    app.include_router(trainer_router.router, prefix="/api/v1")
 
     return app
 
