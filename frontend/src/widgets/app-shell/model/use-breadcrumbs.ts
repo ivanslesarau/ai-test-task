@@ -21,18 +21,23 @@ export type BreadcrumbCrumb =
   | (BaseCrumb & { to: '/profile' })
   | (BaseCrumb & { to: '/admin/users'; search: DirectorySearch })
   | (BaseCrumb & { to: '/admin/users/$userId'; params: { userId: string } })
+  | (BaseCrumb & { to: '/trainer/portal' })
+  | (BaseCrumb & { to: '/trainer/players' })
 
 /**
  * One label per route that has a page worth naming in the trail. The
- * `/_authed/admin` layout route is deliberately absent — it renders only
- * an `<Outlet/>` (see `routes/_authed/admin.tsx`), so it has no page of
- * its own to link to.
+ * `/_authed/admin` and `/_authed/trainer` layout routes are deliberately
+ * absent — they render only an `<Outlet/>` (see `routes/_authed/admin.tsx`
+ * and `routes/_authed/trainer.tsx`), so neither has a page of its own to
+ * link to.
  */
 const ROUTE_LABELS: Partial<Record<string, string>> = {
   '/_authed/': 'Home',
   '/_authed/profile': 'Profile',
   '/_authed/admin/users/': 'Users',
   '/_authed/admin/users/$userId': 'User',
+  '/_authed/trainer/portal': 'Portal settings',
+  '/_authed/trainer/players': 'Players',
 }
 
 const HOME_CRUMB = { key: '/_authed/', label: 'Home', to: '/' } as const
@@ -84,6 +89,12 @@ export function useBreadcrumbs(): BreadcrumbCrumb[] {
           params: match.params as { userId: string },
           isCurrent,
         })
+        break
+      case '/_authed/trainer/portal':
+        pageCrumbs.push({ key: match.routeId, label, to: '/trainer/portal', isCurrent })
+        break
+      case '/_authed/trainer/players':
+        pageCrumbs.push({ key: match.routeId, label, to: '/trainer/players', isCurrent })
         break
       default:
         break

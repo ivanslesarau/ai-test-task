@@ -242,7 +242,8 @@ A 422 with no `fields`, and every other failure status, renders as the form-leve
 | Element | Location | Rule |
 |---|---|---|
 | App shell | `widgets/app-shell`, mounted in `routes/_authed.tsx` | Identity, breadcrumb trail, profile link, sign-out, and the back-control region. Mounted at `_authed` and **not** at `__root`, because `__root` also carries `/login` and `/set-password`, which must show no signed-in chrome (FR-062) |
-| Breadcrumbs | `widgets/app-shell/model/use-breadcrumbs.ts` | Derived from the router's matched routes as typed link descriptors. No URL is built from a string (Principle IV). The `/admin/users` crumb carries the active search params, so the trail returns to the filtered view |
+| Primary nav | `widgets/app-shell/ui/primary-nav.tsx`, from `model/use-nav-items.ts` | One role-aware list of typed link descriptors, discriminated on `to` like `BreadcrumbCrumb`. The shell and the landing area both read it, so they cannot drift. An empty list for a role renders nothing rather than an empty bar. These links are rendering, not permission — every target is guarded by its route and again by the server (FR-015) |
+| Breadcrumbs | `widgets/app-shell/model/use-breadcrumbs.ts` | Derived from the router's matched routes as typed link descriptors. No URL is built from a string (Principle IV). The `/admin/users` crumb carries the active search params, so the trail returns to the filtered view. Covers `/trainer/portal` and `/trainer/players` too; the `/_authed/trainer` layout route is absent for the same reason `/_authed/admin` is |
 | Back control | `shared/ui/back-button.tsx` | `history.back()` when `useCanGoBack()` is true, otherwise a typed `fallbackTo` route, which is required rather than optional so a deep-linked page always offers a way out. History-based back is what satisfies FR-061's "restore the filtered view" without threading search params through links |
 | Search-term navigation | `widgets/user-directory-table` | Debounced 500 ms and navigated with `replace: true`, so typing leaves one history entry. Paging and filter changes push a normal entry — they are steps worth reversing (FR-063, SC-013) |
 
@@ -255,12 +256,12 @@ A 422 with no `fields`, and every other failure status, renders as the form-leve
 
 ## 8. Routes added
 
-| Route file | Path | Guard | Search params |
-|---|---|---|---|
-| `routes/join.$code.tsx` | `/join/$code` | **Public** — renders for a visitor with no session and for a signed-in one | — |
-| `routes/_authed/trainer.tsx` | — | Layout route: 403 view unless role is `trainer` | — |
-| `routes/_authed/trainer/portal.tsx` | `/trainer/portal` | Trainer | — |
-| `routes/_authed/trainer/players.tsx` | `/trainer/players` | Trainer | `page`, `page_size`, `q` |
+| Route file | Path | Guard | Search params | Reached from |
+|---|---|---|---|---|
+| `routes/join.$code.tsx` | `/join/$code` | **Public** — renders for a visitor with no session and for a signed-in one | — | The printed or posted link itself (FR-065) — no in-app entry point by design |
+| `routes/_authed/trainer.tsx` | — | Layout route: 403 view unless role is `trainer` | — | Not navigable — layout only |
+| `routes/_authed/trainer/portal.tsx` | `/trainer/portal` | Trainer | — | Primary nav (§7.3) and the trainer landing area |
+| `routes/_authed/trainer/players.tsx` | `/trainer/players` | Trainer | `page`, `page_size`, `q` | Primary nav (§7.3) and the trainer landing area |
 
 `join.$code.tsx` sits beside `login.tsx` at the top level rather than under `_authed`, because
 `_authed` redirects to `/login` when there is no session — which is exactly the visitor this page

@@ -8,18 +8,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/shared/ui/select'
+import { TrainerContextLabel } from '@/widgets/trainer-context-switcher/ui/trainer-context-label'
 
 /**
- * Renders only when the session reports more than one switchable
- * trainer (FR-088). Reads the list from `useOwnTrainers`, not from the
- * session — the session carries only the count and the active id.
+ * Renders the switchable dropdown only when the session reports more
+ * than one switchable trainer (FR-088). At exactly one, this component
+ * renders `TrainerContextLabel` instead, so the shell keeps a single slot
+ * for "who the player is with" whether that is stated by a control or by
+ * plain text (fix F7/T307). Reads the list from `useOwnTrainers`, not
+ * from the session — the session carries only the count and the active
+ * id.
  */
 export function TrainerContextSwitcher() {
   const { data: session } = useSession()
   const trainers = useOwnTrainers()
   const switchContext = useSwitchTrainerContext()
 
-  if (!session || session.trainer_count <= 1) return null
+  if (!session || session.trainer_count === 0) return null
+  if (session.trainer_count === 1) return <TrainerContextLabel />
   if (!trainers.data) return null
 
   return (

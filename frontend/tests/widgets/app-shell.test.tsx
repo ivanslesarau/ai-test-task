@@ -25,6 +25,77 @@ function mockSuperAdminSession() {
   )
 }
 
+function mockTrainerSession() {
+  server.use(
+    http.get('/api/v1/auth/session', () =>
+      HttpResponse.json({
+        id: 'user-trainer-1',
+        email: 'trainer@example.org',
+        role: 'trainer',
+        status: 'active',
+        first_name: 'Tara',
+        last_name: 'Trainer',
+        photo_url: null,
+      }),
+    ),
+    http.get('/api/v1/me/share-link', () =>
+      HttpResponse.json({
+        id: 'link-1',
+        code: 'abc123',
+        url: 'https://example.org/join/abc123',
+        kind: 'player_standing',
+        is_active: true,
+        use_count: 0,
+        expires_at: null,
+        max_uses: null,
+        created_at: '2026-01-01T00:00:00Z',
+      }),
+    ),
+    http.get('/api/v1/me/branding', () =>
+      HttpResponse.json({ logo_url: null, primary_color: null, updated_at: null }),
+    ),
+  )
+}
+
+function mockCoachSession() {
+  server.use(
+    http.get('/api/v1/auth/session', () =>
+      HttpResponse.json({
+        id: 'user-coach-1',
+        email: 'coach@example.org',
+        role: 'coach',
+        status: 'active',
+        first_name: 'Cody',
+        last_name: 'Coach',
+        photo_url: null,
+      }),
+    ),
+  )
+}
+
+function mockPlayerParentSession() {
+  server.use(
+    http.get('/api/v1/auth/session', () =>
+      HttpResponse.json({
+        id: 'user-player-1',
+        email: 'player@example.org',
+        role: 'player_parent',
+        status: 'active',
+        first_name: 'Pat',
+        last_name: 'Player',
+        photo_url: null,
+        active_trainer_id: null,
+        trainer_count: 0,
+      }),
+    ),
+    // TrainerContextSwitcher reads this unconditionally (it decides
+    // switcher vs. label vs. nothing only after the query resolves).
+    http.get('/api/v1/me/trainers', () =>
+      HttpResponse.json({ active_trainer_id: null, trainers: [] }),
+    ),
+  )
+}
+
 function renderAt(initialPath: string) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const router = createRouter({
@@ -121,5 +192,71 @@ describe('AppShell', () => {
     const signOutButtons = screen.getAllByRole('button', { name: /sign out/i })
     expect(signOutButtons).toHaveLength(1)
     expect(signOutButtons[0].closest('header')).not.toBeNull()
+  })
+
+  it('lists Users in the primary nav for a Super Admin', async () => {
+    mockSuperAdminSession()
+    renderAt('/')
+
+    await screen.findByText('Ada Admin')
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    expect(within(nav).getByRole('link', { name: 'Users' })).toBeInTheDocument()
+  })
+
+  it('lists Portal settings and Players in the primary nav for a Trainer', async () => {
+    mockTrainerSession()
+    renderAt('/')
+
+    await screen.findByText('Tara Trainer')
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    expect(within(nav).getByRole('link', { name: 'Portal settings' })).toBeInTheDocument()
+    expect(within(nav).getByRole('link', { name: 'Players' })).toBeInTheDocument()
+  })
+
+  it('renders no primary nav for a Coach', async () => {
+    mockCoachSession()
+    renderAt('/')
+
+    await screen.findByText('Cody Coach')
+    expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument()
+  })
+
+  it('renders no primary nav for a Player/Parent', async () => {
+    mockPlayerParentSession()
+    renderAt('/')
+
+    await screen.findByText('Pat Player')
+    expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument()
+  })
+
+  it('marks the active section on the primary nav', async () => {
+    mockTrainerSession()
+    renderAt('/trainer/portal')
+
+    await screen.findByRole('heading', { name: 'Portal settings' })
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    const portalLink = within(nav).getByRole('link', { name: 'Portal settings' })
+    const playersLink = within(nav).getByRole('link', { name: 'Players' })
+    // TanStack Router marks the active `<Link>` with `data-status="active"` —
+    // a stable signal that doesn't collide with the `hover:bg-accent`
+    // Tailwind class every ghost-variant Button already carries.
+    expect(portalLink).toHaveAttribute('data-status', 'active')
+    expect(playersLink).not.toHaveAttribute('data-status', 'active')
+  })
+
+  it('renders Home > Portal settings on /trainer/portal', async () => {
+    mockTrainerSession()
+    renderAt('/trainer/portal')
+
+    await screen.findByRole('heading', { name: 'Portal settings' })
+    const breadcrumb = screen.getByRole('navigation', { name: /breadcrumb/i })
+    expect(breadcrumb).toHaveTextContent('Home')
+    expect(breadcrumb).toHaveTextContent('Portal settings')
+
+    const homeLink = within(breadcrumb).getByRole('link', { name: 'Home' })
+    expect(homeLink).toHaveAttribute('href', '/')
+
+    const currentCrumb = within(breadcrumb).getByText('Portal settings')
+    expect(currentCrumb).toHaveAttribute('aria-current', 'page')
   })
 })

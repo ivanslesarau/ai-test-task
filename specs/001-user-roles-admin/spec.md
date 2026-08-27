@@ -624,6 +624,12 @@ while a player in a different trainer's context sees the platform default.
 - **FR-063**: System MUST NOT query the user directory on each keystroke of a search term. It MUST
   wait until typing settles before searching, and MUST NOT record one reversible navigation step per
   character typed.
+- **FR-105**: Every capability a person's role permits MUST be reachable through navigation or a
+  control presented to them — from their role's landing area, from the navigation frame present on
+  every signed-in view, or from a control on a view reached from one of those. A capability that
+  exists but can be reached only by typing an address MUST be treated as not delivered. This does not
+  weaken FR-015: hiding a control remains never the only barrier, and presenting one never implies
+  the platform will accept the action.
 
 **Invitation delivery**
 
@@ -862,6 +868,10 @@ while a player in a different trainer's context sees the platform default.
   branding in 100% of context switches, with no flash of the other trainer's identity.
 - **SC-025**: No trainer-facing view or export reveals that one of their players trains with another
   trainer, verified by a test covering every view available to a Trainer and to a Coach.
+- **SC-026**: For each of the four roles, 100% of the views that role is permitted to reach are
+  reachable by clicking from that role's landing area or navigation frame, and 0% require an address
+  to be typed — verified per role against the application's own route table rather than a hand-kept
+  list.
 
 ## Out of Scope
 

@@ -1071,3 +1071,112 @@ Everything else in User Story 8 ships complete. **If the coach audience is requi
 coach-to-trainer link has to come into scope with it** — that is a specification decision, and it
 would add tasks to Extension Phase D rather than change any task already listed. Nothing else in
 this extension is blocked; implementation may begin at T205.
+
+---
+
+## Fixes: Navigation Entry Points
+
+**Added**: 2026-08-27 | **Source**: post-implementation bug report against branch
+`feature/share-link-and-customization`
+
+Reported verbatim: *"None of the UIs for any role feature navigation or buttons to access new
+features; in other words, they are inaccessible."*
+
+Numbering continues from T300; **no existing task is renumbered or altered.** The defect marker
+continues the F-series at **F7**.
+
+### Format for this phase: `[ID] [P?] [Fix] Description`
+
+| Marker | Reported defect | Verified root cause |
+|---|---|---|
+| **F7** | New features are unreachable by clicking — no role's interface offers navigation or a button to them | The extension built four routes (`/trainer` layout, `/trainer/portal`, `/trainer/players`, `/join/$code`) and **no task in Extension Phases B–E adds a link to any of them.** A repository-wide search for `to="/trainer` in `frontend/src/` returns only `useNavigate({ from: '/trainer/players' })` inside the roster table — no `<Link>` anywhere. `/trainer/portal` (FR-069's copy-and-regenerate panel, FR-093–FR-104's branding controls) and `/trainer/players` (FR-090's roster) are therefore reachable only by typing the URL. Compounding it: `use-breadcrumbs.ts` `ROUTE_LABELS` and the `BreadcrumbCrumb` union were never extended for the trainer routes (T200/T201 predate them), so those pages render **zero crumbs** and the shell reports neither where the person is nor a way back; and the dashboard's trainer branch is still T067's `"Welcome back."` placeholder, written before the two trainer pages existed. The gap reaches the validation walk itself — `quickstart.md` 6.5 and 8.1 instruct the tester to *open* `/trainer/players` and `/trainer/portal` by URL, which is why the walkthrough passed with no entry point in place |
+
+**Per-role reachability, as built** (verified 2026-08-27 against `frontend/src/`):
+
+| Role | Feature | Entry point today | Verdict |
+|---|---|---|---|
+| Super Admin | User directory `/admin/users` | One text link in `pages/dashboard/index.tsx` | Reachable, but from the landing page only — no header nav, so it is unreachable from every other page except through the breadcrumb trail |
+| Super Admin | User detail, erasure record | Row link in `widgets/user-directory-table` | Reachable — correct as a row action |
+| **Trainer** | **Invitation link (copy/regenerate) — `/trainer/portal`** | **none** | **Inaccessible.** Blocks the whole of US6: a trainer cannot obtain the link, so no player can join, so US7 and US8 cannot be demonstrated through the interface at all |
+| **Trainer** | **Portal branding (logo, colour, reset) — `/trainer/portal`** | **none** | **Inaccessible** |
+| **Trainer** | **Roster — `/trainer/players`** | **none** | **Inaccessible** |
+| Coach | — | n/a | No dedicated page exists in this feature; `/profile` is reached from the shell. Correct, and recorded so the empty case is deliberate rather than an omission |
+| Player/Parent | Trainer switcher | `widgets/app-shell`, rendered only above one trainer (FR-088) | Correct |
+| Player/Parent | Active trainer identity at exactly one trainer | none — the switcher is correctly hidden and nothing replaces it | Gap against FR-062's "where in the platform they currently are": after joining, the player lands on `"Welcome back."` with no statement of whose portal they are in |
+| Player/Parent | Join by link `/join/$code` | The link itself, off-platform | Correct by design — the link is printed and posted (FR-065) |
+
+**Root cause is a task-level gap, not only a coding slip.** `plan.md` D-05 fixed the shell's contents
+as identity + breadcrumbs + profile + sign-out + back region, and `contracts/frontend-contracts.md`
+§7.3 records exactly that. Neither names a primary navigation region, and no requirement in `spec.md`
+obliges a role's permitted features to be *reachable* — FR-019 says the landing area exposes "only
+the actions their role permits", which is a restriction on what may be shown, not an obligation to
+show it. So T250 and T252 could create routes, T203 could remove the dashboard's header, and every
+gate could stay green with three pages orphaned. The proposed FR-105 and the D-07 decision below
+close that hole; T308's orphan-route test is what keeps it closed as Epics 02–08 add routes.
+
+---
+
+### Fix Phase I: Role navigation entry points (F7)
+
+**Purpose**: Every feature a role may use is reachable by clicking, from a single role-aware
+descriptor list that the header and the landing area both read, so the two cannot drift.
+
+**Depends on**: nothing outstanding — Fix Phases A–H and Extension Phases A–E are all complete.
+
+**Execution order**: T301 → T302 → T303 → T304 → T305 → T306 → T307 → T308, then T309–T311 in
+parallel, then T312.
+
+- [x] T301 [F7] Create `frontend/src/widgets/app-shell/model/use-nav-items.ts` — a role-aware list of typed nav descriptors, a discriminated union on `to` exactly like `BreadcrumbCrumb` in `use-breadcrumbs.ts`, derived from the `session` query through `entities/session/model/role-guards`: `super_admin` → Users (`/admin/users`, carrying the directory's default search params); `trainer` → Portal settings (`/trainer/portal`) and Players (`/trainer/players`); `coach` and `player_parent` → an empty list, **deliberately** — this feature gives them no dedicated page beyond `/profile` and the switcher, and a link to a page that does not exist is worse than no link. No URL built from a string, no `any` (Principle II, Principle IV routing rule)
+- [x] T302 [F7] Create `frontend/src/widgets/app-shell/ui/primary-nav.tsx` rendering T301's descriptors as TanStack Router `<Link>`s with `activeProps` marking the current section, composing `shared/ui` primitives only; render nothing at all when the list is empty rather than an empty bar. Any shadcn primitive this needs is added through the CLI into `shared/ui` and nowhere else (Principle IV). These links are a **rendering** decision, never a permission boundary — every target is guarded again by its route and again by the server (FR-015)
+- [x] T303 [F7] Mount `PrimaryNav` in `frontend/src/widgets/app-shell/ui/app-shell.tsx` beside the breadcrumb region, leaving the identity block, the back-control region (D-05), and the switcher slot (T268) untouched
+- [x] T304 [F7] Extend `frontend/src/widgets/app-shell/model/use-breadcrumbs.ts` — add `'/trainer/portal'` and `'/trainer/players'` members to the `BreadcrumbCrumb` union and their labels to `ROUTE_LABELS` under route ids `/_authed/trainer/portal` and `/_authed/trainer/players`. The `/_authed/trainer` layout route stays absent for the same reason `/_authed/admin` is — it renders only an `<Outlet/>` and has no page to link to. Today both trainer pages produce an empty trail, so the shell states neither where the person is nor how to get back (FR-062)
+- [x] T305 [F7] Add the two matching `case` branches to `CrumbLink` in `frontend/src/widgets/app-shell/ui/app-shell.tsx` — same file as T303, so these run in sequence. The switch is exhaustive over the union, so T304 landing without this is a compile error, which is exactly the guarantee the union was chosen for
+- [x] T306 [F7] Replace the trainer branch's `"Welcome back."` placeholder in `frontend/src/pages/dashboard/index.tsx` with the trainer's landing entries — Portal settings (invitation link and branding) and Players — read from T301's descriptors rather than hand-written links, so the landing area and the header can never disagree. FR-019 makes the landing area where a role's actions are exposed; T067's placeholder predates both trainer pages. Keep the `player_parent` zero-trainer empty state from T270 and the Super Admin directory link unchanged
+- [x] T307 [F7] Render the active trainer's name for a `player_parent` whose `trainer_count === 1`, where FR-088 correctly forbids the switcher — a static context label in `frontend/src/widgets/trainer-context-switcher/ui/trainer-context-label.tsx`, chosen by the existing switcher component so the shell keeps one slot, reading `active_trainer_id` from the session and the name from `userKeys.trainers`. A player who has just joined otherwise lands on `"Welcome back."` with nothing naming whose portal they are in (FR-062). The switcher itself still renders only above one trainer
+- [x] T308 [F7] Add the orphan-route regression gate in `frontend/tests/routes/entry-points.test.tsx` — enumerate every authenticated path from the generated route tree (`frontend/src/routeTree.gen.ts`, as T255 discovers backend routes from the app's route table rather than hand-listing them) and assert each one is reachable for at least one role from T301's descriptors or T306's landing content, with an explicit allow-list for the paths that are correctly reached another way: `/profile` (shell link), `/admin/users/$userId` (directory row action), `/trainer` (layout route, no page). A route added by Epics 02–08 with no entry point fails here. **This is the gate that stops F7 recurring**
+- [x] T309 [P] [F7] Extend `frontend/tests/widgets/app-shell.test.tsx` — the nav lists Users for a Super Admin, Portal settings and Players for a Trainer, and nothing for a Coach or a Player/Parent; the active section is marked; the trail on `/trainer/portal` reads Home → Portal settings; and the identity block, back region, and switcher slot still render as T204 asserted
+- [x] T310 [P] [F7] Add `frontend/tests/pages/dashboard.test.tsx` — per-role landing content: the directory link for a Super Admin, both trainer entries for a Trainer, the zero-trainer empty state for an unassociated player, and the active trainer's name for an associated one at exactly one trainer
+- [x] T311 [P] [F7] Update the navigation steps in `specs/001-user-roles-admin/quickstart.md` — 6.5 and 8.1 instruct the tester to open `/trainer/players` and `/trainer/portal` by URL, which is how three orphaned pages survived a full manual walkthrough. State the click path through the header instead, and add one step to the US6 walk asserting a trainer signing in can reach their invitation link without typing a URL
+- [x] T312 [F7] Run the full quality gate from quickstart.md §6 — ruff, mypy strict, pytest, ESLint including the boundaries rule, `tsc -b --noEmit`, Vitest — and fix every finding introduced by T301–T311
+
+**Checkpoint**: A trainer signing in can reach their invitation link, their branding, and their roster
+by clicking; every authenticated page carries a breadcrumb trail; a player always sees whose portal
+they are in; and no route can be added without an entry point.
+
+---
+
+### Fixes: Navigation — Same-File Serialization
+
+Additions to the three lists above; these must not be parallelized:
+
+- `frontend/src/widgets/app-shell/ui/app-shell.tsx` — T303, T305 (and T201, T268)
+- `frontend/src/widgets/app-shell/model/use-breadcrumbs.ts` — T304 (and T200)
+- `frontend/src/widgets/app-shell/model/use-nav-items.ts` — T301 (consumed by T302 and T306, so both wait on it)
+- `frontend/src/pages/dashboard/index.tsx` — T306 (and T067, T203, T270)
+- `frontend/src/widgets/trainer-context-switcher/` — T307 (and T267)
+- `frontend/tests/widgets/app-shell.test.tsx` — T309 (and T204)
+
+### Fixes: Navigation — Specification approval state
+
+**APPROVED AND APPLIED** (user approval, 2026-08-27). Tasks T301–T312 are backed by requirements
+already in `spec.md` — FR-019 (the landing area exposes the role's actions), FR-061 and FR-062 (the
+navigation frame states where the person is and offers a way back), and SC-014 — so nothing in this
+phase contradicted an approved artifact and implementation was never blocked on the amendment below.
+
+The amendment adds the **explicit** obligation whose absence allowed the defect, plus the contract
+rows a reviewer would look for. Applied:
+
+| Artifact | Change |
+|---|---|
+| `spec.md` | New **FR-105** under Presentation and navigation: every capability a role is permitted MUST be reachable by navigation or a control from that role's landing area or navigation frame, without typing a URL; and a new **SC-026** measuring it as zero orphaned views per role |
+| `plan.md` | New **D-07** in Post-Implementation Technical Decisions: one role-aware typed nav descriptor list read by both the shell and the landing area; the rejected alternatives (hand-written links per page; a route-meta `nav` field) |
+| `contracts/frontend-contracts.md` | §7.3 gains a **Primary nav** row; §8's route table gains a "Reached from" column naming each new route's entry point |
+
+`data-model.md` and `contracts/openapi.yaml` need no change — this defect is entirely in the
+presentation layer and adds no field, endpoint, or column.
+
+Traceability:
+
+| Fix | Requirements | Plan decision |
+|---|---|---|
+| F7 | FR-019, FR-061, FR-062, SC-014; proposed FR-105, SC-026 | proposed D-07 |

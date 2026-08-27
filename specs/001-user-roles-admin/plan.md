@@ -371,6 +371,28 @@ exactly what this plan's configuration rule forbids. On the client, the re-invit
 reporting success unconditionally and honours `invitation_sent`, which is what FR-064 requires and
 what makes FR-028's recovery loop actually reachable.
 
+### D-07 — One role-aware nav descriptor list, read by both the shell and the landing area (F7)
+
+A seventh defect was reported on 2026-08-27: the extension's trainer pages are unreachable by
+clicking. The fix is one list, not links scattered per page.
+`widgets/app-shell/model/use-nav-items.ts` returns a discriminated union of typed link descriptors
+per role — the same shape `use-breadcrumbs.ts` already uses, so no URL is built from a string and no
+`any` appears — derived from the session role through `entities/session/model/role-guards`.
+`widgets/app-shell/ui/primary-nav.tsx` renders it in the shell; `pages/dashboard` renders the same
+descriptors as the landing area's entries, so the header and the landing page cannot drift apart.
+`coach` and `player_parent` yield an empty list, which is correct rather than missing: this feature
+gives them no dedicated page beyond `/profile` and the context switcher.
+
+D-05 stands unchanged — the shell gains a nav region beside the breadcrumb trail; identity, back
+control, and switcher slot are untouched. The breadcrumb `ROUTE_LABELS` map and the `BreadcrumbCrumb`
+union gain the two trainer routes, which D-05 predates.
+
+**Rejected**: hand-written `<Link>`s on each page that needs one — that is what produced the defect,
+since nothing fails when a page forgets. **Also rejected**: a `nav` field in each route's `staticData`
+— it puts presentation labels in the route tree, and the generated `routeTree.gen.ts` is not a file a
+reviewer reads for navigation. The orphan-route test (tasks.md T308) is what makes the single list
+enforceable: it walks the generated route tree and fails on any authenticated path no role can reach.
+
 ---
 
 ## Extension (2026-08-26): ShareLink Onboarding, Multi-Trainer & Portal Branding

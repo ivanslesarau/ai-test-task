@@ -353,20 +353,21 @@ signed in as a trainer).
 | 6.2 | `GET /api/v1/join/{code}` unauthenticated | 200; body carries **only** business name, branding, and `viewer.state: anonymous` — no trainer id, no contact detail |
 | 6.3 | Register with valid detail | 201; `Set-Cookie` present; already signed in; lands in that trainer's context (FR-078) |
 | 6.4 | `GET /me/trainers` as the new account | One entry — the link's trainer; `active_trainer_id` matches it |
-| 6.5 | Sign in as the trainer, open `/trainer/players` | The new player is on the roster |
-| 6.6 | Look in `EMAIL_OUTBOX_DIR` | One confirmation message naming the trainer (FR-079) |
-| 6.7 | Register again with the same email | 409 `email_already_registered`, telling the person to sign in and reopen the link (FR-076) |
-| 6.8 | Check the database after 6.7 | Exactly one account for that email; no orphan profile, player detail, or association (FR-083) |
-| 6.9 | Submit `is_self: true` with a date of birth 12 years ago | 422 with the error on `date_of_birth` — a self-registering player is 18 or over (FR-077) |
-| 6.10 | Submit `is_self: false` with a date of birth 30 years ago | 422 on `date_of_birth` — a dependant is 1 to 18 |
-| 6.11 | Submit `is_self: false` with no `player_name` | 422 on `player_name` |
-| 6.12 | Regenerate the link as the trainer, then open the old code | 404 `invitation_link_invalid` within seconds (SC-020) |
-| 6.13 | Check the associations after 6.12 | The player from 6.3 is still on the roster (FR-069) |
-| 6.14 | Deactivate the trainer, open their current code | 404, same message and body as 6.12 — the refusal does not say why (FR-070) |
-| 6.15 | Request 11 unknown codes from one origin | 11th returns 429 with `Retry-After` (FR-071) |
-| 6.16 | Wait out the window, request a valid code | 200 — access resumes with no intervention (SC-021) |
+| 6.5 | Sign in as the trainer; without typing a URL, click **Players** in the header's primary nav | Lands on `/trainer/players`; the new player is on the roster (fix F7 — the header, not the address bar, is the entry point) |
+| 6.6 | Still signed in as the trainer, without typing a URL, click **Portal settings** in the header's primary nav | Lands on `/trainer/portal`; the invitation link (copy/regenerate) is visible with no separate click needed to find it (fix F7, FR-105) |
+| 6.7 | Look in `EMAIL_OUTBOX_DIR` | One confirmation message naming the trainer (FR-079) |
+| 6.8 | Register again with the same email | 409 `email_already_registered`, telling the person to sign in and reopen the link (FR-076) |
+| 6.9 | Check the database after 6.8 | Exactly one account for that email; no orphan profile, player detail, or association (FR-083) |
+| 6.10 | Submit `is_self: true` with a date of birth 12 years ago | 422 with the error on `date_of_birth` — a self-registering player is 18 or over (FR-077) |
+| 6.11 | Submit `is_self: false` with a date of birth 30 years ago | 422 on `date_of_birth` — a dependant is 1 to 18 |
+| 6.12 | Submit `is_self: false` with no `player_name` | 422 on `player_name` |
+| 6.13 | Regenerate the link as the trainer, then open the old code | 404 `invitation_link_invalid` within seconds (SC-020) |
+| 6.14 | Check the associations after 6.13 | The player from 6.3 is still on the roster (FR-069) |
+| 6.15 | Deactivate the trainer, open their current code | 404, same message and body as 6.13 — the refusal does not say why (FR-070) |
+| 6.16 | Request 11 unknown codes from one origin | 11th returns 429 with `Retry-After` (FR-071) |
+| 6.17 | Wait out the window, request a valid code | 200 — access resumes with no intervention (SC-021) |
 
-Checking that the refusal discloses nothing (6.14):
+Checking that the refusal discloses nothing (6.15):
 
 ```bash
 curl -s http://localhost:8000/api/v1/join/definitely-not-a-real-code    > /tmp/a.json
@@ -414,7 +415,7 @@ player from US7.
 
 | # | Action | Expected |
 |---|---|---|
-| 8.1 | As Trainer A, open `/trainer/portal` | Branding controls and the invitation link on one page |
+| 8.1 | As Trainer A, without typing a URL, click **Portal settings** in the header's primary nav | Lands on `/trainer/portal`; branding controls and the invitation link on one page (fix F7, FR-105) |
 | 8.2 | Choose a 500 KB PNG | Previewed in place; **not** applied anywhere until saved (FR-097) |
 | 8.3 | Save | Logo appears in the trainer's own header |
 | 8.4 | Pick a primary colour | Preview updates live; accents and the gradient follow it on save (FR-098) |

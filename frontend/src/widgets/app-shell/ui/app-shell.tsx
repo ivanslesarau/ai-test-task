@@ -17,6 +17,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import type { BreadcrumbCrumb } from "@/widgets/app-shell/model/use-breadcrumbs";
 import { useBreadcrumbs } from "@/widgets/app-shell/model/use-breadcrumbs";
+import { PrimaryNav } from "@/widgets/app-shell/ui/primary-nav";
 import { TrainerContextSwitcher } from "@/widgets/trainer-context-switcher/ui/trainer-context-switcher";
 
 const ROLE_LABEL: Record<UserRole, string> = {
@@ -67,6 +68,18 @@ function CrumbLink({ crumb }: { crumb: BreadcrumbCrumb }) {
           </Link>
         </BreadcrumbLink>
       );
+    case "/trainer/portal":
+      return (
+        <BreadcrumbLink asChild>
+          <Link to="/trainer/portal">{crumb.label}</Link>
+        </BreadcrumbLink>
+      );
+    case "/trainer/players":
+      return (
+        <BreadcrumbLink asChild>
+          <Link to="/trainer/players">{crumb.label}</Link>
+        </BreadcrumbLink>
+      );
   }
 }
 
@@ -111,6 +124,7 @@ export function AppShell() {
             </BreadcrumbList>
           </Breadcrumb>
         )}
+        <PrimaryNav />
       </div>
 
       {user && (
