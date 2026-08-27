@@ -469,3 +469,189 @@ grep -rn "branding" frontend/src --include=*.tsx | grep -E "<object|<embed|dange
 ```
 
 Both should print nothing.
+
+---
+
+# Extension validation (2026-08-27): US9, US10, US11, US12, US13
+
+Run after migrations `0008`–`0010` are applied. **Verify `0009` before going further** — it is a data
+migration that re-points every trainer association, and §33 of the data model names what to check.
+The seed path gains `seed-demo-family`, which creates a parent with a `self` profile, two children —
+one with a sign-in, one without — and one pending request; building that state by hand means signing
+in as a child, following a link, and signing back in as the parent before any assertion can be made.
+
+```bash
+cd backend
+uv run alembic upgrade head                       # 0007 → 0010
+uv run pytest -q tests/integration/test_migration_backfill.py   # check 0009 before anything else
+uv run python -m app.cli seed-demo-family         # prints: parent + child credentials, profile ids
+```
+
+## US9 — A Parent Puts Their Whole Family on One Account
+
+**Setup**: a parent from `seed-demo-family`, or any player who joined a trainer through US6.
+
+| # | Action | Expected |
+|---|---|---|
+| 9.1 | As a parent, add a child with a name, age and gender | 201; the child appears on `/family` marked as a child (FR-106) |
+| 9.2 | As a parent associated with exactly one trainer, add a child answering **yes** to the single question naming that trainer | Child associated with it; the trainer's roster shows the child (FR-122) |
+| 9.3 | Repeat answering **no** | Child created with an empty `associations` list; no roster shows them (FR-123) |
+| 9.4 | As a parent associated with three trainers, add a child selecting two | Exactly those two associations exist; the third trainer's roster does not show the child (FR-122) |
+| 9.5 | As a parent associated with no trainer, add a child | No trainer question is asked; profile created with no association (Story 9 scenario 4) |
+| 9.6 | Submit a child with `date_of_birth` 25 years ago | 422 on `date_of_birth` — adults hold their own accounts (FR-108) |
+| 9.7 | Submit a child with no gender | 422 on `gender` (FR-107) |
+| 9.8 | Submit a second child with the same name and date of birth | 409 `possible_duplicate_profile`, body listing the match (FR-110) |
+| 9.9 | Resend 9.8 with `acknowledge_possible_duplicate: true` | 201 — the warning does not block (FR-110, R-45) |
+| 9.10 | As a parent who trains, look at `/family` | Their own profile appears alongside the children, distinguished as the account holder (FR-106) |
+| 9.11 | `POST /me/players` twice attempting two `self` profiles | The second is refused — the partial unique index enforces one (FR-106, Story 9 scenario 8) |
+| 9.12 | As a **Trainer**, `POST /me/players` | 403 — only the account holder manages their own family (Story 9 scenario 10) |
+| 9.13 | `GET /me/players/{profile_id}` for a profile on another account | **404, not 403** — a profile on another account is not confirmed to exist (FR-112) |
+
+**The partial unique index in 9.11 is the real proof, not the service check.** `uq_player_profiles_one_self`
+is what makes two concurrent submissions produce one profile; `tests/integration/test_family_profiles.py`
+races them, which a manual walk cannot.
+
+## US10 — A Parent Decides Which Trainers Each Child Trains With
+
+**Setup**: a parent associated with two trainers and one child associated with one of them.
+
+| # | Action | Expected |
+|---|---|---|
+| 10.1 | `GET /me/players` | Each profile lists its trainers with the date each association began (FR-124) |
+| 10.2 | Add the second trainer to the child by `trainer_id` | Child on both rosters; `associations` has two entries (FR-125) |
+| 10.3 | Add a trainer to the child by invitation `code` | Associated; an invalid code is refused under the same rules as any other use (FR-125, FR-070) |
+| 10.4 | Send both `code` and `trainer_id` | 422 — exactly one is required |
+| 10.5 | Add a trainer the child already trains with | 200, no second association, `associations` unchanged (Story 10 scenario 4) |
+| 10.6 | Remove an association by `association_id` | 204; the trainer's roster no longer lists the child (FR-126) |
+| 10.7 | Check the child's history with that trainer after 10.6 | Still present — the association is inactive, not deleted (FR-126) |
+| 10.8 | Re-add the trainer removed in 10.6 | The **same** `player_profile_id` is reused; no duplicate profile; earlier history still attached (FR-127) |
+| 10.9 | Remove the child's last association | Profile still exists with an empty `associations` list, shown as belonging to no program (Story 10 scenario 8) |
+| 10.10 | As the **child** (signed in), attempt 10.2 and 10.6 directly with curl | 403 both times — a child changes no association, including their own (FR-128, FR-132) |
+| 10.11 | As a parent, remove an association belonging to another account's profile | 404 (FR-128) |
+
+The prompt in 10.6 must name the child and the trainer and state that upcoming reservations will be
+cancelled (FR-126). **No reservation is actually cancelled in this slice** — reservations arrive with
+Epic-02, and the statement is the part this feature can satisfy.
+
+## US11 — A Child Signs In and Finds Most Doors Locked
+
+**Setup**: a parent with two children, one of whom has been granted a sign-in.
+
+| # | Action | Expected |
+|---|---|---|
+| 11.1 | As a parent, grant a child a sign-in with a fresh email | 201; `invitation_sent: true`; a setup link in `EMAIL_OUTBOX_DIR` (FR-129) |
+| 11.2 | Grant a sign-in using the parent's own email | 409 `email_already_registered` — no sharing a login (FR-129, FR-004) |
+| 11.3 | Follow the setup link, choose a password, sign in as the child | Admitted; `is_child_account: true`; only their own profile is visible (FR-129, R-38) |
+| 11.4 | As the child, browse their program, view their token balance, change their own photo | Each succeeds (FR-131) |
+| 11.5 | As the child, `POST /me/players` — try to own a child profile | 403 (FR-132) |
+| 11.6 | As the child, `PATCH /me/players/{own_id}` with `tokens_without_approval: true` | 403 `parent_only_field` — a child cannot widen their own permission (FR-132, FR-147) |
+| 11.7 | As the child, `GET /me/players/{sibling_id}` | **404** — a sibling is not confirmed to exist (FR-132, R-48) |
+| 11.8 | As the child, `PUT /me/context` naming a sibling's profile | 404, same body as 11.7 (FR-132) |
+| 11.9 | As the child on two trainers, `GET /me/contexts` | Only their own profile's pairs; no sibling, no parent entry, flat grouping (FR-119) |
+| 11.10 | As the child on one trainer, check the switcher | Not shown (`context_count` is 1) (FR-119) |
+| 11.11 | As the child, open a **new** trainer's invitation link | 403 `child_must_ask_parent`; no association created; nothing on the account changed (FR-137) |
+| 11.12 | Look in `EMAIL_OUTBOX_DIR` after 11.11 | One message **to the parent** naming the child and the trainer, carrying the link (FR-138) |
+| 11.13 | Repeat 11.11 three more times | Still no association; **no further email**; `GET /me/approvals` shows one request, not four (FR-139, R-51) |
+| 11.14 | As the child, open the link of a trainer they already train with | Told they are already connected; no request raised, no email (FR-140) |
+| 11.15 | As a parent, revoke the child's sign-in | Child cannot sign in; their existing session stops working within a minute; profile, trainers, and history untouched (FR-134) |
+| 11.16 | Deactivate the parent, then try the child's sign-in | Refused; child sessions revoked (FR-136, SC-041) |
+| 11.17 | Reactivate the parent, try again | Admitted — suspension is derived from the parent's status, so restoring needs no separate step (FR-136, R-50) |
+| 11.18 | Remove the child's profile, then try their sign-in | Refused — a credential never outlives its player (FR-135) |
+
+**11.5 through 11.8 are spot checks, not the proof.** `tests/integration/test_child_permissions.py`
+asserts every action FR-132 forbids against every route, and
+`tests/integration/test_sibling_isolation.py` sweeps every context-scoped route with a two-child
+fixture. That second test **is** SC-028 and SC-040.
+
+## US12 — A Parent Approves or Denies What Their Child Asks For
+
+**Setup**: the pending `join_trainer` request produced by 11.11, or by `seed-demo-family`.
+
+| # | Action | Expected |
+|---|---|---|
+| 12.1 | As the child, `GET /me/requests` | One entry, `status: pending_parent_approval`; the child is **not** associated with the trainer (FR-141, FR-144) |
+| 12.2 | As the parent, `GET /me/approvals` | The request, naming the child, what is asked, when it was raised, and `expires_at` (FR-149) |
+| 12.3 | Check the notifications from 11.11 | An email to the parent **and** an in-app notice; the navigation frame carries a pending count (FR-148, FR-159) |
+| 12.4 | As the parent, approve it | 200; the child is now associated with the trainer within seconds; the trainer's roster shows them (FR-151, SC-033) |
+| 12.5 | As the child, re-read `GET /me/requests` | `status: approved`; the new trainer is in their switcher (FR-153) |
+| 12.6 | Approve the same request again | 409 `request_already_resolved` (FR-156) |
+| 12.7 | Raise a second request, then deny it with a note | Not associated; `status: denied`; the child sees the parent's note (FR-149, FR-153) |
+| 12.8 | Raise a third request, ask for more information with a note | `status: info_requested`; the child sees the note; **`expires_at` is unchanged** (FR-150, FR-155) |
+| 12.9 | As the child, respond to 12.8 | Back to `pending_parent_approval` with `child_note` set; `expires_at` still unchanged (FR-143, FR-155) |
+| 12.10 | As the child, withdraw a pending request | `status: withdrawn`; not associated; gone from the parent's queue (FR-154) |
+| 12.11 | As the child, approve their own request | 403 (FR-156) |
+| 12.12 | As the child, call `POST /join/{code}/accept` directly to bypass the request | 403 `child_must_ask_parent` — the request is not a suggestion (FR-144, FR-133) |
+| 12.13 | Raise a request, revoke the trainer's link, then approve | 422 `approval_subject_unavailable`; status is **still live**, not `approved`; the request remains in the queue (FR-151, R-42) |
+| 12.14 | Raise a request, then have another parent session approve it simultaneously | Exactly one 200 and one 409; exactly one association exists (FR-156, SC-038) |
+| 12.15 | Raise a request, wind the clock past 48 h, run `uv run python -m app.cli prune` | `status: expired`; not associated; **both** parent and child notified (FR-155, SC-034) |
+| 12.16 | Attempt to approve the expired request from 12.15 | 409 — and note it was already unapprovable *before* the sweep ran, because the predicate checks `expires_at` (R-41, R-43) |
+| 12.17 | Deactivate the parent, then approve one of their pending requests | Refused; never auto-approved; still expires on its original schedule (FR-157, SC-041) |
+| 12.18 | Review the audit trail after 12.4, 12.7 and 12.15 | One entry each, naming the child profile, the request, the decision, the actor, and the time — with **no actor** for the expiry (FR-158, R-43) |
+| 12.19 | With `tokens_without_approval: false`, have the child spend tokens | Waits for approval exactly as a payment does (FR-146) |
+| 12.20 | Set `tokens_without_approval: true` for that child, spend again | Completes immediately; the parent gets an informational notice that asks for no decision (FR-146) |
+| 12.21 | With the setting **on**, have the child request a USD payment | Still requires approval — no setting waives it (FR-145, SC-035) |
+| 12.22 | Change one child's setting; check the other child and any pending request | Sibling's setting unchanged; pending requests unaffected (FR-147, SC-037) |
+| 12.23 | Approve a `usd_payment` or `token_spend` request | 422 `approval_kind_not_executable` — taking payment belongs to Epic-05 (FR-142, R-46) |
+
+**12.19 to 12.21 cannot be walked end to end in this slice**, and that is by design, not an oversight:
+tokens and payments arrive with Epic-05. What is testable now is the *decision* — that a spend of
+either kind is refused approval while no executor is registered (12.23), and that the rules deciding
+whether approval is needed at all are enforced at request creation. `tests/unit/test_approval_rules.py`
+covers the rule matrix directly; the walk above records the intended behaviour so the Epic-05 slice
+inherits the checklist rather than rediscovering it.
+
+**12.15 needs a controlled clock.** Do not wait two days: the integration suite injects the deadline,
+and `tests/integration/test_approval_expiry.py` is what SC-034 measures. The manual step exists to
+confirm the `prune` subcommand actually sends both notifications.
+
+## US13 — A Family Chooses Who Joins When a Parent Follows a New Trainer's Link
+
+**Setup**: a parent with a `self` profile and two children, plus a third trainer's link.
+
+| # | Action | Expected |
+|---|---|---|
+| 13.1 | As that parent, open the third trainer's link | `viewer.state: choose_family_members`; `selectable_profiles` lists the account holder and both children (FR-122) |
+| 13.2 | Select the account holder and one child, confirm | Exactly those two are on the new trainer's roster; the other child is not (Story 13 scenario 2) |
+| 13.3 | Check the link's use count after 13.2 | Rose by exactly 2 (FR-068, SC-019) |
+| 13.4 | Select nobody and confirm | No association created; nothing changed (Story 13 scenario 3) |
+| 13.5 | As a parent with **no** children, open a new trainer's link | No question asked; associated exactly as US7 describes (Story 13 scenario 4) |
+| 13.6 | Re-open the link from 13.2 | The two already-joined profiles show as connected and cannot be selected; the remaining child can (FR-082) |
+| 13.7 | Select the remaining child from 13.6 and confirm | Use count rises by exactly 1 — the already-connected profiles cost nothing (FR-082, SC-019) |
+| 13.8 | Check the active context after 13.2 | The account holder's profile with the new trainer, because it was among those selected (Story 13 scenario 6) |
+| 13.9 | Select only a child and confirm | Active context is that child with the new trainer |
+
+## Cross-cutting checks — family accounts
+
+| Check | How | Requirement |
+|---|---|---|
+| Sibling isolation across every context-scoped route | `tests/integration/test_sibling_isolation.py` with a two-child fixture | SC-028, SC-040, FR-117 |
+| Every action FR-132 forbids a child, submitted directly | `tests/integration/test_child_permissions.py` | SC-029, FR-133 |
+| A trainer never sees a sibling who does not train with them | `tests/integration/test_trainer_isolation.py`, extended with a family fixture | FR-116, SC-040 |
+| One live request per child and subject, under concurrency | `tests/integration/test_approval_duplicates.py` races two creations | FR-139, R-40 |
+| Resolution happens exactly once | `tests/integration/test_approval_concurrency.py` races approve/approve and approve/expire | SC-038, FR-156 |
+| Approval failure leaves the request live | `tests/integration/test_approval_rollback.py` revokes the link mid-flight | FR-151, R-42 |
+| Migration 0009 preserves every association | `tests/integration/test_migration_backfill.py` — counts before and after 0008→0009→0010 | FR-114, data-model §33 |
+| Migration 0009 downgrade refuses to discard children | Same file — asserts it **raises** for a multi-profile account | data-model §33 |
+| Erasing a parent erases their children's sign-ins | `tests/integration/test_erasure_family.py` | FR-047, data-model §30 |
+| Reporting totals unchanged across a family erasure | Same file, against a fixed data set | SC-008, FR-047 |
+| Parent-only nav entries reachable by clicking | `tests/routes/entry-points.test.tsx`, extended | FR-159, SC-026 |
+
+## Quality gates — family accounts
+
+No new commands. One grep joins the four already in §6 and the extension above:
+
+```bash
+# A player profile id arriving as a query parameter — ownership must be validated in the
+# service against the caller, never selected by the caller (R-48).
+grep -rn "player_profile_id" backend/src/app/api/ | grep "Query("
+```
+
+Should print nothing. The existing `trainer_id` grep still applies unchanged, and this slice is the
+reason it matters more, not less: the family routes name a trainer in a **body** precisely so that
+guard keeps its meaning (R-48).
+
+**One deployment obligation this slice introduces**, recorded here because no test can catch it: the
+`prune` subcommand now also expires approval requests and sends their notifications (R-43). Requests
+become unapprovable on time regardless — the server predicate guarantees that — but the "your request
+expired" email waits for the next run. Schedule `uv run python -m app.cli prune` at least hourly
+(`cron`, or Windows Task Scheduler). Nothing in the application starts it.

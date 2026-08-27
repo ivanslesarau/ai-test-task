@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PracticePerfect — User Roles, Authorization & Super Admin User Management
-  version: 1.1.0
+  version: 1.2.0
   description: |
     Contract for feature 001-user-roles-admin. Covers sign-in and session handling,
     invitation-driven first password setup, self-service profile editing for all four roles,
@@ -15,6 +15,21 @@ info:
     Authentication is a session cookie (see securitySchemes). Every response body is a
     Pydantic V2 model; no endpoint ever returns a database error, driver message, or stack
     trace (FR-056).
+
+    Version 1.2.0 adds the 2026-08-27 extension: one account holding a whole family, the
+    parent's control over which trainers each child trains with, a child's own constrained
+    sign-in, and the Pending Parent Approval workflow. Those operations are grouped in the
+    `family` and `approvals` tags and under `/me/players`, `/me/context`, `/me/approvals`, and
+    `/me/requests`.
+
+    **1.2.0 contains breaking changes**, made once while this repository's own frontend is the
+    only consumer (research.md R-49). A trainer association now names a *player profile* rather
+    than an account (FR-114), so: `PlayerParentDetail` loses the per-player fields, which are now
+    per-profile; `TrainerPlayerSummary` names a profile and carries the responsible parent's
+    contact detail; and `GET /me/trainers` plus `PUT /me/trainer-context` are replaced by
+    `GET /me/contexts` plus `PUT /me/context`, whose subject is a profile-and-trainer pair. No
+    versioned duplicate of any replaced operation is retained and the URL prefix stays
+    `/api/v1` — this is a pre-release contract revision, not a second public version.
 
     Traceability: each operation carries `x-requirements` listing the spec requirements it
     satisfies.
@@ -35,6 +50,10 @@ tags:
     description: Public invitation-link preview, registration, and association
   - name: trainer
     description: A trainer's own organization — currently their player roster
+  - name: family
+    description: A parent's own player profiles, their trainers, and their children's sign-ins
+  - name: approvals
+    description: Requests a child raised and the parent decides — the Pending Parent Approval workflow
 
 security:
   - sessionCookie: []
@@ -724,32 +743,57 @@ paths:
       tags: [join]
       summary: Join the trainer as an already signed-in player
       operationId: acceptJoinLink
-      x-requirements: [FR-080, FR-081, FR-082, FR-084, FR-085]
+      x-requirements: [FR-080, FR-081, FR-082, FR-084, FR-085, FR-122, FR-132, FR-137]
       description: |
-        No body and no detail to supply: the account already exists (FR-080). Creates the
-        association and switches the caller's active context to the new trainer.
+        The account already exists (FR-080). Creates the associations and switches the caller's
+        active context to the new trainer.
 
-        Repeating the call for a trainer already joined returns 200 with
-        `already_associated: true`, creates nothing, and does **not** raise the link's use
-        count (FR-082).
+        **Changed in 1.2.0**: the body now says *who* joins. A parent holding children selects
+        family members (FR-122, Story 13); an account holding exactly one profile may send no
+        body at all and that profile is used, which is the 1.1.0 behaviour unchanged. Selecting
+        nobody associates nobody and changes nothing.
 
-        A caller whose role is not `player_parent` is refused and nothing is written (FR-081).
+        Profiles already joined to this trainer are reported back in
+        `already_associated_profile_ids`, create nothing, and do **not** raise the link's use
+        count (FR-082); the count rises by exactly the number of new associations (FR-068).
+
+        A caller whose role is not `player_parent` is refused and nothing is written (FR-081). A
+        **signed-in child** is refused with `child_must_ask_parent`: no association is created,
+        the parent is emailed, and an approval request of kind `join_trainer` is raised for them
+        to decide (FR-137, FR-138). Repeating it raises no second request and sends no second
+        email (FR-139, R-51).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JoinAcceptRequest' }
       responses:
         '200':
-          description: Associated, or already associated. The active context is the link's trainer.
+          description: |
+            Associated, already associated, or nothing selected. The active context is the
+            link's trainer unless nothing was selected.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/JoinResult' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403':
-          description: The caller's role cannot join through a player link (FR-081).
+          description: |
+            The caller's role cannot join through a player link (FR-081), or the caller is a
+            child, who must ask their parent (FR-137).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
-              example:
-                error:
-                  code: role_cannot_join
-                  message: This link is for players and parents.
+              examples:
+                roleCannotJoin:
+                  value:
+                    error:
+                      code: role_cannot_join
+                      message: This link is for players and parents.
+                childMustAskParent:
+                  value:
+                    error:
+                      code: child_must_ask_parent
+                      message: Ask your parent to register you with this trainer.
         '404':
           description: The link is not valid (FR-070).
           content:
@@ -795,56 +839,72 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
-  /me/trainers:
+  /me/contexts:
     get:
       tags: [me]
-      summary: List the trainers this player trains with
-      operationId: listOwnTrainers
-      x-requirements: [FR-084, FR-088, FR-089]
+      summary: List the profile-and-trainer pairs this account can look at
+      operationId: listOwnContexts
+      x-requirements: [FR-114, FR-117, FR-118, FR-119, FR-120]
       description: |
-        Player/Parent only. Backs the context switcher. Returns only Active associations whose
-        trainer account is Active (FR-089); an entry is therefore always switchable. When the
-        list holds one entry the interface shows no switcher (FR-088); when it is empty the
-        person belongs to no trainer, which is a valid state.
+        Player/Parent only. Backs the context switcher, and **replaces `GET /me/trainers`**,
+        whose entries named a trainer alone (R-49). Returns only Active associations whose
+        trainer account is Active and whose profile is live (FR-089, FR-120); an entry is
+        therefore always switchable. One entry means the interface shows no switcher
+        (FR-118, FR-119); an empty list means the person belongs to no trainer, which is valid.
+
+        A parent receives one entry per profile-and-trainer pair across every profile on the
+        account, each naming its profile so the interface can group the account holder's own
+        training separately from each child's (FR-118). A signed-in child receives only the
+        pairs of the single profile their sign-in is attached to — no sibling and no parent
+        entry appears, and the grouping is flat (FR-119, FR-132).
       responses:
         '200':
-          description: The caller's trainers, and which one is active.
+          description: The caller's switchable pairs, and which one is active.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TrainerContextList' }
+              schema: { $ref: '#/components/schemas/TrainingContextList' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
-  /me/trainer-context:
+  /me/context:
     put:
       tags: [me]
-      summary: Switch which trainer this player is looking at
-      operationId: switchTrainerContext
-      x-requirements: [FR-086, FR-087, FR-088, FR-090]
+      summary: Switch which player profile and trainer this account is looking at
+      operationId: switchTrainingContext
+      x-requirements: [FR-117, FR-119, FR-120, FR-132]
       description: |
-        The only way context changes. No other endpoint accepts a trainer identifier, because
-        context is a data-isolation boundary rather than a view preference (R-25).
+        The only way context changes, and **replaces `PUT /me/trainer-context`** (R-49). The
+        subject is a *pair*, because FR-117 makes the isolation boundary a profile and a trainer
+        together — a sibling is on the same account, so naming only the trainer would not
+        identify a context.
 
-        A trainer the caller holds no Active association with returns **404, not 403** — a
-        refusal that distinguished "not yours" from "does not exist" would confirm the
-        existence of trainers the caller cannot see (FR-090).
+        The trainer is named **in this body, never as a path or query parameter**: context stays
+        server-resolved everywhere else (R-25), and CI fails the build on a `trainer_id` request
+        parameter outside the admin router.
+
+        A pair the caller cannot reach returns **404, not 403** — for the reason FR-090 already
+        established for trainers, and now also for a sibling's profile, which a child must not
+        be able to confirm exists (FR-132, R-48).
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/TrainerContextRequest' }
+            schema: { $ref: '#/components/schemas/TrainingContextRequest' }
       responses:
         '200':
           description: |
             The new active context. The client discards every cached context-scoped response
-            before rendering (R-26).
+            before rendering, under the `['ctx', profileId, trainerId, …]` namespace (R-26, R-47).
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TrainerContextList' }
+              schema: { $ref: '#/components/schemas/TrainingContextList' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
-          description: No Active association with that trainer, or no such trainer (FR-090).
+          description: |
+            No such reachable pair: the profile is not one the caller may look at, the
+            association is not Active, or the trainer is not Active. One message for all three
+            (FR-090, FR-132).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -1037,6 +1097,620 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  # ---------------------------------------------------------------------------
+  # Extension (2026-08-27): parent/child family accounts, child sign-in,
+  # and the Pending Parent Approval workflow
+  # ---------------------------------------------------------------------------
+
+  /me/players:
+    get:
+      tags: [family]
+      summary: List the player profiles on this account
+      operationId: listOwnPlayers
+      x-requirements: [FR-106, FR-112, FR-124]
+      description: |
+        Player/Parent only. The family page: the account holder's own profile if they train,
+        plus every child, each with the trainers it is associated with and the date each
+        association began (FR-124).
+
+        A signed-in child receives only their own profile (FR-132) — a sibling never appears,
+        which is enforced in the same place every context decision is made (R-48).
+      responses:
+        '200':
+          description: The live profiles on this account.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerProfileList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+    post:
+      tags: [family]
+      summary: Add a child profile to this account
+      operationId: createOwnChildPlayer
+      x-requirements: [FR-106, FR-107, FR-108, FR-110, FR-112, FR-122, FR-123]
+      description: |
+        Parent only — a signed-in child cannot own a profile (FR-132).
+
+        Creates one `child` profile and associates it with exactly the trainers named in
+        `trainer_ids`, which the interface has gathered by asking the question FR-122 describes:
+        a single yes/no naming the one trainer, a checklist when there are several, nothing at
+        all when the parent has none. An empty or omitted list creates the profile with no
+        association, which is valid (FR-123, Story 9 scenario 4).
+
+        An age outside 1–18 is a 422 on `date_of_birth` (FR-108). A near-duplicate is a **409**
+        the parent may overrule by resending with `acknowledge_possible_duplicate: true`
+        (FR-110, R-45) — a warning that does not block, expressed as a refusal that can be
+        retried rather than a note attached to something already created.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateChildProfileRequest' }
+      responses:
+        '201':
+          description: The created child profile with its associations.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: |
+            A profile of a closely similar name and the same date of birth already exists on
+            this account. Resend with `acknowledge_possible_duplicate: true` to create it
+            anyway (FR-110).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DuplicateProfileError' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /me/players/{profile_id}:
+    parameters:
+      - $ref: '#/components/parameters/PlayerProfileId'
+    get:
+      tags: [family]
+      summary: Read one player profile on this account
+      operationId: getOwnPlayer
+      x-requirements: [FR-112, FR-124, FR-132]
+      description: |
+        A profile the caller may not reach returns **404, not 403** — for a profile on another
+        account, and for a sibling when the caller is a child. A refusal that distinguished the
+        two would confirm the sibling exists (FR-112, FR-132, R-48).
+      responses:
+        '200':
+          description: The profile and its associations.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+    patch:
+      tags: [family]
+      summary: Update a player profile on this account
+      operationId: updateOwnPlayer
+      x-requirements: [FR-107, FR-111, FR-112, FR-131, FR-132, FR-147]
+      description: |
+        A partial update, following the same null semantics as every other PATCH in this
+        contract: an omitted key leaves its value untouched, an explicit `null` clears it, and
+        the empty string is a 422 naming the field (FR-059, constitution Principle VI).
+
+        Who may change what differs by caller, and the difference is enforced on the request
+        rather than by withholding a control (FR-133):
+
+        - The **owning parent** may change every writable field, including
+          `tokens_without_approval` (FR-147).
+        - A **signed-in child**, on their own profile only, may change `photo_key` through the
+          photo endpoint and nothing else here. Any other field — and in particular
+          `tokens_without_approval` — is a 403 (FR-131, FR-132).
+
+        `first_name` and `last_name` are writable only on a `child` profile; on a `self` profile
+        they are absent by design and supplying them is a 422, because the name is the account's
+        (R-37). `skill_level` is never writable (FR-107).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlayerProfileUpdate' }
+      responses:
+        '200':
+          description: The updated profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403':
+          description: A child attempted a field only the parent may change (FR-132).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: parent_only_field
+                  message: Only a parent can change this setting.
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+    delete:
+      tags: [family]
+      summary: Remove a player profile from this account
+      operationId: deleteOwnPlayer
+      x-requirements: [FR-111, FR-112, FR-132, FR-135]
+      description: |
+        Parent only. A **soft** removal: the profile stops appearing on the family page and on
+        every trainer's roster, and every historical record attached to it survives untouched,
+        exactly as a deactivated account's history does (FR-111, and §29 of the data model).
+
+        Any sign-in granted to this child stops working immediately and its sessions are
+        revoked — a credential never outlives the player it belongs to (FR-135).
+      responses:
+        '204':
+          description: Removed. Nothing is returned.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /me/players/{profile_id}/photo:
+    parameters:
+      - $ref: '#/components/parameters/PlayerProfileId'
+    put:
+      tags: [family]
+      summary: Upload a photo for a player profile
+      operationId: uploadOwnPlayerPhoto
+      x-requirements: [FR-107, FR-131, FR-132]
+      description: |
+        Accepted for the owning parent on any profile, and for a signed-in child on their own
+        profile — updating their own photo is one of the few things FR-131 permits them.
+
+        Same limits and same validation as a profile photo: the file must decode as JPEG, PNG,
+        or WebP and be at most 5 MB, and the declared content type must match what it decodes
+        as (FR-034, R-07). A `self` profile has no photo of its own — use `PUT /me/profile/photo`
+        instead, and a request here for one is a 422 (R-37).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '200':
+          description: The stored photo's API-relative URLs.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PhotoUrls' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /me/players/{profile_id}/trainers:
+    parameters:
+      - $ref: '#/components/parameters/PlayerProfileId'
+    post:
+      tags: [family]
+      summary: Add a trainer to a player profile
+      operationId: addOwnPlayerTrainer
+      x-requirements: [FR-125, FR-127, FR-128, FR-132]
+      description: |
+        Parent only — a child cannot change any association, including their own (FR-128,
+        FR-132).
+
+        Two ways in, exactly as FR-125 states: supply the trainer's invitation `code`, validated
+        under the same five-part predicate as any other use of it (FR-070); or name a
+        `trainer_id` the account is already associated with through some profile. Exactly one of
+        the two must be present.
+
+        The trainer is named **in this body, never in the path** — see `PUT /me/context` for why
+        (R-25, R-48).
+
+        Re-adding a trainer a profile was previously removed from reuses the same profile and
+        keeps its earlier history (FR-127). Adding one already active returns 200 and writes
+        nothing (Story 10 scenario 4).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddPlayerTrainerRequest' }
+      responses:
+        '200':
+          description: |
+            Associated, or already associated. The profile's full association list is returned
+            so the family page needs no second read.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: |
+            No such profile, no valid invitation link, or no such trainer among those this
+            account already trains with. One message for all three (FR-070, FR-090).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/LookupThrottled' }
+
+  /me/players/{profile_id}/trainers/{association_id}:
+    parameters:
+      - $ref: '#/components/parameters/PlayerProfileId'
+      - $ref: '#/components/parameters/AssociationId'
+    delete:
+      tags: [family]
+      summary: Remove a trainer from a player profile
+      operationId: removeOwnPlayerTrainer
+      x-requirements: [FR-126, FR-128, FR-132]
+      description: |
+        Parent only (FR-128). The association becomes inactive: the trainer's roster no longer
+        lists this player, and every record of what already happened under it survives
+        (FR-126).
+
+        Addressed by the **association's** identifier rather than the trainer's — better
+        addressing, and it keeps the trainer's identifier out of path parameters where CI
+        forbids it (R-48).
+
+        The interface must have confirmed first, naming the player and the trainer and stating
+        that upcoming reservations with that trainer will be cancelled (FR-126). Those
+        reservations do not exist until Epic-02; the statement is the requirement this feature
+        can satisfy, and the cancellation belongs to the epic that creates the thing cancelled.
+      responses:
+        '204':
+          description: Removed. Nothing is returned.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such association on a profile this caller owns.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /me/players/{profile_id}/sign-in:
+    parameters:
+      - $ref: '#/components/parameters/PlayerProfileId'
+    put:
+      tags: [family]
+      summary: Grant a child their own sign-in
+      operationId: grantOwnChildSignIn
+      x-requirements: [FR-129, FR-130, FR-132, FR-135]
+      description: |
+        Parent only, and only for a `child` profile — a `self` profile's sign-in is the account
+        itself (R-37).
+
+        Creates a `player_parent` account holding the supplied email and invites the child to
+        choose their own password through the same single-use setup link any invited account
+        uses (FR-025 – FR-027). The address is subject to the existing uniqueness rule across
+        every status, so the parent's own address is refused rather than shared (FR-004,
+        FR-129).
+
+        Every notification about this child continues to reach the **parent's** address. The
+        child's address receives only their own credential mail (FR-130).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GrantChildSignInRequest' }
+      responses:
+        '201':
+          description: |
+            The sign-in was created and the setup invitation sent. `invitation_sent` is false
+            when delivery failed, which is not reported as success (FR-064).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChildSignIn' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The email already belongs to an account in any status (FR-004, FR-129).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: email_already_registered
+                  message: That email address is already in use.
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+    delete:
+      tags: [family]
+      summary: Revoke a child's sign-in
+      operationId: revokeOwnChildSignIn
+      x-requirements: [FR-134]
+      description: |
+        Parent only. The child can no longer sign in and every session they hold stops working
+        immediately, under the same mechanism that revokes sessions when an account leaves
+        Active status (FR-012).
+
+        The child's profile, associations, and history are untouched — this removes a way in,
+        not a player (FR-134).
+      responses:
+        '204':
+          description: Revoked. Nothing is returned.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /me/requests:
+    get:
+      tags: [approvals]
+      summary: List the requests this child raised
+      operationId: listOwnRaisedRequests
+      x-requirements: [FR-131, FR-153]
+      description: |
+        The child's own view: what they asked for and where each request stands, including the
+        parent's note when the parent denied it or asked for more information (FR-153).
+
+        A parent calling this receives the requests they raised, which is normally none —
+        requests are raised by children. The parent's decision queue is `/me/approvals`.
+      parameters:
+        - name: status
+          in: query
+          description: Filter to one status. Omitted, every status is returned, newest first.
+          schema: { $ref: '#/components/schemas/ApprovalRequestStatus' }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+      responses:
+        '200':
+          description: One page of the caller's own requests.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequestPage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /me/requests/{request_id}/withdraw:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalRequestId'
+    post:
+      tags: [approvals]
+      summary: Withdraw a request this child raised
+      operationId: withdrawOwnRequest
+      x-requirements: [FR-154, FR-156]
+      description: |
+        Only the child the request concerns, and only while it is still live. The request closes
+        as `withdrawn`, the action is not carried out, and it leaves the parent's queue
+        (FR-154).
+
+        A request already resolved — approved, denied, expired, or withdrawn — returns **409**,
+        because resolution happens exactly once (FR-156, R-41).
+      responses:
+        '200':
+          description: Withdrawn.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RequestAlreadyResolved' }
+
+  /me/approvals:
+    get:
+      tags: [approvals]
+      summary: List the requests awaiting this parent's decision
+      operationId: listOwnApprovals
+      x-requirements: [FR-149, FR-159]
+      description: |
+        Parent only. Each entry carries the child, what is asked, the amount when the request is
+        financial, when it was raised, and when it expires — from which the interface derives
+        the time remaining (FR-149).
+
+        Defaults to the live statuses, because this is a decision queue rather than a history.
+        Pass `status` to read the rest. Reached from the navigation frame with a count while any
+        are pending, which is what makes the workflow reachable by clicking (FR-159, FR-105).
+      parameters:
+        - name: status
+          in: query
+          description: |
+            Filter to one status. Omitted, only `pending_parent_approval` and `info_requested`
+            are returned, oldest deadline first.
+          schema: { $ref: '#/components/schemas/ApprovalRequestStatus' }
+        - name: player_profile_id
+          in: query
+          description: Filter to one child. Must be a profile on the caller's account.
+          schema: { type: string, format: uuid }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+      responses:
+        '200':
+          description: One page of the caller's decision queue.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequestPage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /me/approvals/{request_id}:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalRequestId'
+    get:
+      tags: [approvals]
+      summary: Read one request awaiting this parent
+      operationId: getOwnApproval
+      x-requirements: [FR-141, FR-149]
+      responses:
+        '200':
+          description: The request.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /me/approvals/{request_id}/approve:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalRequestId'
+    post:
+      tags: [approvals]
+      summary: Approve a child's request and carry the action out
+      operationId: approveOwnApproval
+      x-requirements: [FR-142, FR-144, FR-150, FR-151, FR-152, FR-156, FR-157, FR-158]
+      description: |
+        Parent only, and only the parent this request names (or a Super Admin acting in
+        support). The requested action is carried out **in the same transaction** as the status
+        change, under exactly the rules that would apply had the parent performed it themselves
+        (FR-151), and exactly once (FR-144).
+
+        When the action cannot be completed — the invitation link has since been revoked, the
+        trainer is no longer Active, the profile has been removed — the response is **422**
+        naming the cause, the request is **not** recorded as approved, and it stays in the
+        parent's queue awaiting a further decision (FR-151, R-42).
+
+        A financial request is refused with **422 `approval_kind_not_executable`** while no
+        executor is registered for its kind: taking payment and debiting tokens belong to
+        Epic-05, and FR-142 forbids marking such a request approved before the act can be
+        performed (R-46). This is a known and intended gap.
+
+        An amount that no longer matches what the parent was shown is refused rather than
+        charged at the new figure (FR-152).
+
+        A request already resolved returns **409**; where two approvals arrive together exactly
+        one takes effect and the other receives that 409 (FR-156, SC-038, R-41).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalDecisionRequest' }
+      responses:
+        '200':
+          description: Approved, and the action carried out.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RequestAlreadyResolved' }
+        '422':
+          description: |
+            The approval could not be completed, and nothing was recorded as approved.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                subjectUnavailable:
+                  value:
+                    error:
+                      code: approval_subject_unavailable
+                      message: That trainer is no longer available. The request is still waiting for you.
+                notExecutable:
+                  value:
+                    error:
+                      code: approval_kind_not_executable
+                      message: This kind of request cannot be completed yet.
+                amountChanged:
+                  value:
+                    error:
+                      code: approval_amount_changed
+                      message: The amount has changed since this request was made.
+
+  /me/approvals/{request_id}/deny:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalRequestId'
+    post:
+      tags: [approvals]
+      summary: Deny a child's request
+      operationId: denyOwnApproval
+      x-requirements: [FR-149, FR-150, FR-153, FR-156, FR-158]
+      description: |
+        The action is not carried out, the request closes as `denied`, and the child is told —
+        with the parent's note when one was given (FR-149, FR-153).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalDecisionRequest' }
+      responses:
+        '200':
+          description: Denied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RequestAlreadyResolved' }
+
+  /me/approvals/{request_id}/request-info:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalRequestId'
+    post:
+      tags: [approvals]
+      summary: Ask the child for more information before deciding
+      operationId: requestInfoOnOwnApproval
+      x-requirements: [FR-143, FR-150, FR-153, FR-155]
+      description: |
+        Moves the request to `info_requested` and shows the child the parent's note, which is
+        required here (FR-150). The child replies through
+        `POST /me/requests/{request_id}/respond`, which returns it to
+        `pending_parent_approval`.
+
+        The 48-hour deadline is **not** restarted — it is an absolute timestamp written when the
+        request was raised, so a request cannot be held open indefinitely by repeated questions
+        (FR-155, R-43).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalInfoRequest' }
+      responses:
+        '200':
+          description: Information requested.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RequestAlreadyResolved' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /me/requests/{request_id}/respond:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalRequestId'
+    post:
+      tags: [approvals]
+      summary: Reply to a parent's request for more information
+      operationId: respondToOwnRequest
+      x-requirements: [FR-143, FR-153, FR-155]
+      description: |
+        Only the child the request concerns, and only from `info_requested`. Returns the request
+        to `pending_parent_approval` with the child's note attached, without restarting the
+        deadline (FR-143, FR-155).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalInfoRequest' }
+      responses:
+        '200':
+          description: Replied; the request is pending again.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The request is not awaiting information.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
 components:
   securitySchemes:
     sessionCookie:
@@ -1060,6 +1734,27 @@ components:
       required: true
       description: The invitation link's code, exactly as issued (R-21).
       schema: { type: string, minLength: 8, maxLength: 64 }
+    PlayerProfileId:
+      name: profile_id
+      in: path
+      required: true
+      description: |
+        A player profile on the caller's own account. Unreachable profiles — another account's,
+        or a sibling's when the caller is a child — are 404 rather than 403 (FR-112, R-48).
+      schema: { type: string, format: uuid }
+    AssociationId:
+      name: association_id
+      in: path
+      required: true
+      description: |
+        A trainer association's own identifier. Associations are addressed this way rather than
+        by the trainer's identifier, which CI forbids in a path parameter (R-25, R-48).
+      schema: { type: string, format: uuid }
+    ApprovalRequestId:
+      name: request_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
 
   responses:
     Unauthenticated:
@@ -1136,6 +1831,18 @@ components:
             error:
               code: stale_version
               message: This account was changed by someone else. Reload and try again.
+    RequestAlreadyResolved:
+      description: |
+        The approval request has already been approved, denied, withdrawn, or has expired.
+        Resolution happens exactly once: where two decisions arrive together, one takes effect
+        and the other receives this (FR-156, SC-038, R-41).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: request_already_resolved
+              message: This request has already been decided.
 
   schemas:
     UserRole:
@@ -1217,19 +1924,36 @@ components:
             API-relative path, resolved against this document's server base path. A client
             rendering it in a DOM `src` MUST prefix its own API base URL. Null when no photo is
             stored; the interface shows the default avatar.
+        active_player_profile_id:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            Which player profile the caller is currently looking at. Player/Parent only, and
+            null for every other role and for an account with no reachable context. Together
+            with `active_trainer_id` this is the pair every player-facing read is scoped to
+            (FR-117).
         active_trainer_id:
           type: [string, 'null']
           format: uuid
           description: |
-            Player/Parent only, and null for every other role and for a player who belongs to
-            no trainer. The context every player-facing read is scoped to. Changed only through
-            `PUT /me/trainer-context` — no other endpoint accepts a trainer identifier (R-25).
-        trainer_count:
+            The trainer half of the active pair. Null under the same conditions as
+            `active_player_profile_id`; the two are always both set or both null. Changed only
+            through `PUT /me/context` — no other endpoint accepts a trainer identifier (R-25).
+        context_count:
           type: integer
           default: 0
           description: |
-            How many switchable trainers the caller has. The interface shows the switcher only
-            above one (FR-088). Zero for every non-player role.
+            How many switchable profile-and-trainer pairs the caller has, **replacing
+            `trainer_count`** (R-49). The interface shows the switcher only above one
+            (FR-118, FR-119). Zero for every non-player role.
+        is_child_account:
+          type: boolean
+          default: false
+          description: |
+            True when this account is a child's own sign-in — derived from the existence of a
+            player profile naming it, never stored as a column (R-38). The interface uses it to
+            withhold the controls FR-132 forbids; the platform refuses those actions on the
+            request regardless (FR-133).
         portal_branding:
           $ref: '#/components/schemas/PortalBranding'
           description: |
@@ -1273,16 +1997,23 @@ components:
     PlayerParentDetail:
       type: object
       additionalProperties: false
+      description: |
+        What remains true of the *account* rather than of any one player on it: the family's
+        emergency contact, held once and serving every child (FR-113).
+
+        **Changed in 1.2.0.** `school`, `jersey_number`, and `skill_level` were removed — they
+        describe one player, and an account now holds several (FR-106, FR-114). They live on
+        `PlayerProfile` and are reached through `/me/players` (R-34, R-49).
       properties:
-        school: { type: [string, 'null'], maxLength: 200 }
-        jersey_number: { type: [string, 'null'], maxLength: 10 }
-        skill_level:
-          type: [string, 'null']
-          readOnly: true
-          description: Assigned by a trainer in a later feature. Never writable here (FR-007, FR-033).
         emergency_contact_name: { type: [string, 'null'], maxLength: 200 }
         emergency_contact_phone: { type: [string, 'null'], maxLength: 32 }
         emergency_contact_relation: { type: [string, 'null'], maxLength: 100 }
+        profile_count:
+          type: integer
+          readOnly: true
+          description: |
+            How many live player profiles the account holds — the account holder's own, if they
+            train, plus each child. Zero is valid for an account created by a Super Admin.
 
     RoleDetail:
       description: |
@@ -1613,19 +2344,37 @@ components:
           properties:
             state:
               type: string
-              enum: [anonymous, can_join, already_associated, role_cannot_join]
+              enum: [anonymous, can_join, choose_family_members, already_associated, role_cannot_join, child_must_ask_parent]
               description: |
                 `anonymous` → show the registration form. `can_join` → show one confirm button
                 (FR-080). `already_associated` → say so and offer the trainer's area (FR-082).
                 `role_cannot_join` → explain the link is for players and parents (FR-081).
+
+                Added in 1.2.0: `choose_family_members` → the caller is a parent holding at
+                least one child profile, so ask who this trainer is for and post the answer to
+                `/join/{code}/accept` (FR-122, Story 13). `child_must_ask_parent` → the caller
+                is a signed-in child, so show the "ask your parent" message; the platform has
+                already raised the request and emailed the parent (FR-137, FR-138).
+            selectable_profiles:
+              type: array
+              description: |
+                Present only for `choose_family_members`. Every live profile on the caller's
+                account, each flagged with whether it already trains with this trainer — those
+                cannot be selected again and cost the link nothing (FR-082, Story 13 scenario 5).
+              items: { $ref: '#/components/schemas/JoinSelectableProfile' }
 
     JoinRegistrationRequest:
       type: object
       additionalProperties: false
       required: [first_name, last_name, email, password, phone, is_self, gender, date_of_birth]
       description: |
-        One account, one player. Child profiles are out of scope, so there is no list of family
-        members here; the field that keeps that door open is `is_self`.
+        One account, one player — still. Registration creates the account and its first player
+        profile; further children are added afterwards through `POST /me/players` (FR-122), so
+        this body carries no list of family members even now that families exist.
+
+        `is_self` was described in 1.1.0 as "the field that keeps that door open". 1.2.0 opens
+        it: `is_self` now selects the created profile's `kind` (`self` or `child`), which is the
+        same distinction it always encoded (R-34).
       properties:
         first_name: { type: string, minLength: 1, maxLength: 100 }
         last_name: { type: string, minLength: 1, maxLength: 100 }
@@ -1656,74 +2405,176 @@ components:
             1 and 18 when not. Stored as a date so it does not decay (R-31).
         gender: { $ref: '#/components/schemas/Gender' }
 
-    TrainerContextEntry:
+    TrainingContextEntry:
       type: object
       additionalProperties: false
-      required: [trainer_id, display_name, branding, joined_at]
+      required: [player_profile_id, player_display_name, player_profile_kind, trainer_id, trainer_display_name, branding, joined_at]
+      description: |
+        One switchable pair, **replacing `TrainerContextEntry`** (R-49). Names both halves,
+        because a parent's switcher groups by profile and a sibling training with the same
+        trainer is a different context (FR-117, FR-118).
       properties:
+        player_profile_id: { type: string, format: uuid }
+        player_display_name:
+          type: string
+          description: |
+            The child's own name, or the account holder's name for a `self` profile — the
+            platform resolves which source applies (R-37), so the client never chooses.
+        player_profile_kind: { $ref: '#/components/schemas/PlayerProfileKind' }
         trainer_id: { type: string, format: uuid }
-        display_name: { type: string }
+        trainer_display_name: { type: string }
         branding: { $ref: '#/components/schemas/PortalBranding' }
         joined_at: { type: string, format: date-time }
 
-    TrainerContextList:
+    TrainingContextList:
       type: object
       additionalProperties: false
-      required: [active_trainer_id, trainers]
+      required: [active_player_profile_id, active_trainer_id, contexts]
       description: |
-        The switcher's whole state. `trainers` holds only Active associations with Active
-        trainers, so every entry is switchable (FR-089). One entry means no switcher is shown
-        (FR-088); an empty list means the person belongs to no trainer, which is valid.
+        The switcher's whole state, **replacing `TrainerContextList`** (R-49). `contexts` holds
+        only Active associations with Active trainers on live profiles, so every entry is
+        switchable (FR-089, FR-120). One entry means no switcher is shown (FR-118, FR-119); an
+        empty list means the person belongs to no trainer, which is valid.
+
+        For a signed-in child every entry carries the same `player_profile_id` — their own — and
+        no sibling appears (FR-119, FR-132).
       properties:
+        active_player_profile_id:
+          type: [string, 'null']
+          format: uuid
+          description: Null only when `contexts` is empty; always set together with `active_trainer_id`.
         active_trainer_id:
           type: [string, 'null']
           format: uuid
-          description: Null only when `trainers` is empty.
-        trainers:
+          description: Null only when `contexts` is empty.
+        contexts:
           type: array
-          items: { $ref: '#/components/schemas/TrainerContextEntry' }
+          items: { $ref: '#/components/schemas/TrainingContextEntry' }
 
-    TrainerContextRequest:
+    TrainingContextRequest:
       type: object
       additionalProperties: false
-      required: [trainer_id]
+      required: [player_profile_id, trainer_id]
+      description: |
+        Both halves are required — a trainer alone no longer identifies a context (FR-117). The
+        trainer is named here rather than in the path, which is what keeps context
+        server-resolved everywhere else (R-25, R-48).
       properties:
+        player_profile_id: { type: string, format: uuid }
         trainer_id: { type: string, format: uuid }
+
+    JoinSelectableProfile:
+      type: object
+      additionalProperties: false
+      required: [player_profile_id, display_name, kind, already_associated]
+      description: |
+        One family member offered on the "who will train with this trainer?" question
+        (FR-122, Story 13).
+      properties:
+        player_profile_id: { type: string, format: uuid }
+        display_name: { type: string }
+        kind: { $ref: '#/components/schemas/PlayerProfileKind' }
+        already_associated:
+          type: boolean
+          description: |
+            True when this profile already trains with the link's trainer. Shown as connected
+            and not selectable; selecting it would cost the link a use for nothing (FR-082).
+
+    JoinAcceptRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Added in 1.2.0. Which family members join the link's trainer (FR-122, Story 13).
+
+        Omit `player_profile_ids` entirely — or send it empty — and nothing is associated and
+        nothing changes (Story 13 scenario 3). An account holding exactly one profile may omit
+        it and that profile is used, which keeps the 1.1.0 behaviour for a person with no
+        children (Story 13 scenario 4).
+      properties:
+        player_profile_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: |
+            Each must be a live profile on the caller's account. A profile already associated
+            with this trainer is ignored rather than refused, and does not raise the link's use
+            count (FR-082).
 
     JoinResult:
       type: object
       additionalProperties: false
-      required: [trainer_id, trainer_display_name, already_associated, active_trainer_id]
+      required: [trainer_id, trainer_display_name, associated_profile_ids, already_associated_profile_ids, active_player_profile_id, active_trainer_id]
+      description: |
+        **Changed in 1.2.0**: a single join may now associate several family members, so the
+        result reports sets rather than one boolean (Story 13).
       properties:
         trainer_id: { type: string, format: uuid }
         trainer_display_name: { type: string }
-        already_associated:
-          type: boolean
-          description: True when the caller was already connected. Nothing was written and the use count did not move (FR-082).
-        active_trainer_id:
-          type: string
+        associated_profile_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: |
+            The profiles newly associated by this call. The link's use count rose by exactly
+            this many (FR-068, SC-019).
+        already_associated_profile_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: |
+            Profiles that were already connected. Nothing was written for them and the use
+            count did not move (FR-082).
+        active_player_profile_id:
+          type: [string, 'null']
           format: uuid
-          description: The context the caller is now in — the link's trainer.
+          description: |
+            The context the caller is now in. The account holder's profile when it was among
+            those selected, otherwise the first selected child (Story 13 scenario 6). Null when
+            nothing was selected.
+        active_trainer_id:
+          type: [string, 'null']
+          format: uuid
+          description: The link's trainer, or null when nothing was selected.
 
     TrainerPlayerSummary:
       type: object
       additionalProperties: false
-      required: [player_user_id, display_name, is_self, joined_at, photo_url]
+      required: [player_profile_id, display_name, kind, joined_at, photo_url, responsible_contact]
       description: |
         One row of a trainer's roster. Deliberately carries nothing about the player's other
-        trainers — not an identifier, not a count (FR-090, SC-025).
+        trainers — not an identifier, not a count (FR-090, SC-025) — and nothing about any other
+        profile on the same account (FR-116, SC-040).
+
+        **Changed in 1.2.0**: names a player profile rather than an account (`player_user_id` is
+        gone), and carries the responsible adult's contact detail, because a trainer with a
+        child on their roster must be able to reach the parent (FR-116).
       properties:
-        player_user_id: { type: string, format: uuid }
+        player_profile_id: { type: string, format: uuid }
         display_name:
           type: string
-          description: The player's name, or "Deleted User" for an erased account (FR-091).
-        is_self: { type: boolean }
+          description: The player's name, or "Deleted User" once erased (FR-091, FR-116).
+        kind: { $ref: '#/components/schemas/PlayerProfileKind' }
         age:
           type: [integer, 'null']
           description: Derived from the stored date of birth; null once erased (R-31).
         gender: { type: [string, 'null'] }
         joined_at: { type: string, format: date-time }
         photo_url: { type: [string, 'null'] }
+        responsible_contact:
+          $ref: '#/components/schemas/ResponsibleContact'
+          description: |
+            The account responsible for this player. For a `self` profile that is the player
+            themselves; for a `child` it is the parent (FR-113, FR-116).
+
+    ResponsibleContact:
+      type: object
+      additionalProperties: false
+      required: [display_name, email, phone]
+      description: |
+        The adult a trainer contacts about a player. Never carries the responsible account's
+        identifier, so a roster row cannot be used to correlate siblings across two trainers'
+        rosters (FR-116, SC-040).
+      properties:
+        display_name: { type: string }
+        email: { type: [string, 'null'], format: email }
+        phone: { type: [string, 'null'] }
 
     TrainerPlayerPage:
       type: object
@@ -1736,3 +2587,303 @@ components:
         page: { type: integer }
         page_size: { type: integer }
         total: { type: integer }
+
+    # -------------------------------------------------------------------------
+    # Extension (2026-08-27): family accounts, child sign-in, approvals
+    # -------------------------------------------------------------------------
+
+    PlayerProfileKind:
+      type: string
+      enum: [self, child]
+      description: |
+        `self` — the account holder is this player; at most one per account, and its name and
+        photo are the account's (R-37). `child` — a player the account holder is responsible
+        for; any number per account, carrying its own name and photo.
+
+    PlayerProfileAssociation:
+      type: object
+      additionalProperties: false
+      required: [association_id, trainer_id, trainer_display_name, joined_at]
+      description: |
+        One trainer a player profile trains with, as the family sees it (FR-124). Addressed for
+        removal by `association_id` (R-48).
+      properties:
+        association_id: { type: string, format: uuid }
+        trainer_id: { type: string, format: uuid }
+        trainer_display_name: { type: string }
+        joined_at: { type: string, format: date-time }
+
+    PlayerProfile:
+      type: object
+      additionalProperties: false
+      required: [id, kind, display_name, photo_url, tokens_without_approval, has_sign_in, associations]
+      description: |
+        One player on the account (FR-106, FR-107). Replaces the per-player fields that
+        `PlayerParentDetail` carried before 1.2.0 (R-34).
+      properties:
+        id: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/PlayerProfileKind' }
+        display_name:
+          type: string
+          description: |
+            Resolved by the platform: the child's own name, or the account holder's name for a
+            `self` profile. The client never chooses the source (R-37).
+        first_name:
+          type: [string, 'null']
+          maxLength: 100
+          description: Null for a `self` profile, where the name is the account's (R-37).
+        last_name: { type: [string, 'null'], maxLength: 100 }
+        date_of_birth: { type: [string, 'null'], format: date }
+        age:
+          type: [integer, 'null']
+          readOnly: true
+          description: Derived from `date_of_birth`, never stored (R-31).
+        gender: { type: [string, 'null'] }
+        school: { type: [string, 'null'], maxLength: 200 }
+        jersey_number: { type: [string, 'null'], maxLength: 10 }
+        skill_level:
+          type: [string, 'null']
+          readOnly: true
+          description: Assigned by a trainer in a later feature. Never writable by the family (FR-107).
+        photo_url:
+          type: [string, 'null']
+          description: API-relative; see PhotoUrls. Null renders the default avatar.
+        tokens_without_approval:
+          type: boolean
+          description: |
+            Whether this child may spend tokens without asking. Defaults to false — approval
+            required — and only the parent may change it (FR-146, FR-147, R-44). Always false
+            and unwritable on a `self` profile, which needs nobody's approval.
+        has_sign_in:
+          type: boolean
+          description: |
+            Whether this child holds their own sign-in (FR-129). The email itself is not
+            returned here; read it from `ChildSignIn` when granting.
+        associations:
+          type: array
+          description: The trainers this profile currently trains with (FR-124).
+          items: { $ref: '#/components/schemas/PlayerProfileAssociation' }
+
+    PlayerProfileList:
+      type: object
+      additionalProperties: false
+      required: [profiles]
+      description: |
+        Every live profile on the account. Not paged — a family is small, and FR-124 asks for
+        the whole list on one page. A signed-in child receives exactly one entry (FR-132).
+      properties:
+        profiles:
+          type: array
+          items: { $ref: '#/components/schemas/PlayerProfile' }
+
+    CreateChildProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [first_name, last_name, date_of_birth, gender]
+      description: |
+        Creates a `child` profile (FR-107). `kind` is not a field — this endpoint creates
+        children only, and the account holder's own profile is created at registration.
+      properties:
+        first_name: { type: string, minLength: 1, maxLength: 100 }
+        last_name: { type: string, minLength: 1, maxLength: 100 }
+        date_of_birth:
+          type: string
+          format: date
+          description: |
+            A real past date whose derived age is between 1 and 18. An adult's date is a 422 on
+            this field — adults hold their own accounts (FR-108, Story 9 scenario 9).
+        gender: { $ref: '#/components/schemas/Gender' }
+        school: { type: [string, 'null'], minLength: 1, maxLength: 200 }
+        jersey_number: { type: [string, 'null'], minLength: 1, maxLength: 10 }
+        trainer_ids:
+          type: array
+          description: |
+            The trainers this child will train with, as answered to FR-122's question. Each must
+            be one the caller's account already trains with. Omitted or empty creates the
+            profile with no association, which is valid (FR-123).
+          items: { type: string, format: uuid }
+        acknowledge_possible_duplicate:
+          type: boolean
+          default: false
+          description: |
+            Set true to create the profile despite a 409 duplicate warning. Twins and a child
+            named for a parent are ordinary, so the warning is overrulable (FR-110, R-45).
+
+    PlayerProfileUpdate:
+      type: object
+      additionalProperties: false
+      description: |
+        Every field optional — a partial update. An omitted key leaves its stored value
+        untouched. A key present with value `null` clears the stored value. The empty string is
+        not a way to say "no value" and is rejected with a 422 naming the field (FR-059).
+
+        `first_name` and `last_name` may be omitted but may not be sent as `null` on a `child`
+        profile — both are required there — and may not be sent at all on a `self` profile,
+        where the name belongs to the account (R-37).
+
+        `tokens_without_approval` is writable only by the parent; a child sending it receives a
+        403 rather than a silent no-op (FR-132, FR-147).
+      properties:
+        first_name: { type: string, minLength: 1, maxLength: 100 }
+        last_name: { type: string, minLength: 1, maxLength: 100 }
+        date_of_birth: { type: string, format: date }
+        gender: { $ref: '#/components/schemas/Gender' }
+        school: { type: [string, 'null'], minLength: 1, maxLength: 200 }
+        jersey_number: { type: [string, 'null'], minLength: 1, maxLength: 10 }
+        tokens_without_approval: { type: boolean }
+
+    DuplicateProfileError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      description: |
+        The 409 a near-duplicate child produces, carrying what matched so the parent can see
+        whether they meant it (FR-110, R-45).
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, matches]
+          properties:
+            code: { type: string, enum: [possible_duplicate_profile] }
+            message: { type: string }
+            matches:
+              type: array
+              description: The existing profiles that matched on name and date of birth.
+              items: { $ref: '#/components/schemas/PlayerProfile' }
+
+    AddPlayerTrainerRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Exactly one of `code` or `trainer_id` must be present — FR-125's two ways in. Supplying
+        both, or neither, is a 422.
+      properties:
+        code:
+          type: [string, 'null']
+          minLength: 8
+          maxLength: 64
+          description: A trainer's invitation link code, validated exactly as any other use of it (FR-070).
+        trainer_id:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            A trainer the caller's account already trains with through some profile. Named in
+            the body rather than the path, so context stays server-resolved (R-25, R-48).
+
+    GrantChildSignInRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      description: |
+        The email that becomes this child's login (FR-129). Subject to the platform-wide
+        uniqueness rule across every status, so the parent's own address is refused rather than
+        shared (FR-004).
+      properties:
+        email: { type: string, format: email, maxLength: 320 }
+
+    ChildSignIn:
+      type: object
+      additionalProperties: false
+      required: [player_profile_id, email, invitation_sent]
+      properties:
+        player_profile_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        invitation_sent:
+          type: boolean
+          description: |
+            False when the setup invitation could not be delivered. A failed delivery is never
+            reported as success; re-grant to try again (FR-064).
+
+    ApprovalRequestKind:
+      type: string
+      enum: [join_trainer, usd_payment, token_spend]
+      description: |
+        `join_trainer` is the only kind this feature creates and carries out — its subject
+        exists today (FR-138). `usd_payment` and `token_spend` have their rules and their
+        recorded shape here, and their execution belongs to Epic-05; approving either is refused
+        while no executor is registered (FR-142, R-46).
+
+    ApprovalRequestStatus:
+      type: string
+      enum: [pending_parent_approval, info_requested, approved, denied, expired, withdrawn]
+      description: |
+        `pending_parent_approval` and `info_requested` are live; the other four are terminal
+        (FR-143). Only `approved` permits the requested action to happen, and it happens exactly
+        once (FR-144). `expired` is distinguished from `denied` so a parent who never saw a
+        request is distinguishable in the record from one who considered it and said no (R-43).
+
+    ApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [id, player_profile_id, player_display_name, kind, status, requested_at, expires_at]
+      description: |
+        One thing a child asked for and a parent must decide (FR-141). The subject fields
+        present depend on `kind`: a `join_trainer` request names a trainer; a financial request
+        carries an amount and currency.
+      properties:
+        id: { type: string, format: uuid }
+        player_profile_id: { type: string, format: uuid }
+        player_display_name:
+          type: string
+          description: The child this request is about, so the parent's queue reads without a second call.
+        kind: { $ref: '#/components/schemas/ApprovalRequestKind' }
+        status: { $ref: '#/components/schemas/ApprovalRequestStatus' }
+        trainer_id: { type: [string, 'null'], format: uuid }
+        trainer_display_name:
+          type: [string, 'null']
+          description: Present for a `join_trainer` request — what the child is asking to join.
+        amount_minor:
+          type: [integer, 'null']
+          description: |
+            Minor currency units — an integer, never a float (R-39). This is the amount the
+            parent was shown; approving at a different figure is refused (FR-152).
+        currency: { type: [string, 'null'], minLength: 3, maxLength: 3 }
+        requested_at: { type: string, format: date-time }
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            48 hours after `requested_at`, written once and never recomputed — asking the child
+            for information does not restart it (FR-155, R-43). The interface derives the time
+            remaining from this.
+        parent_note: { type: [string, 'null'], maxLength: 1000 }
+        child_note: { type: [string, 'null'], maxLength: 1000 }
+        resolved_at: { type: [string, 'null'], format: date-time }
+        resolved_by:
+          type: [string, 'null']
+          enum: [parent, child, super_admin, null]
+          description: |
+            Who resolved it. Null for an expiry, which nobody performed — the one resolution
+            with no actor (R-43).
+
+    ApprovalRequestPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, page_size, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ApprovalRequest' }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+
+    ApprovalDecisionRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        An optional note the parent may attach to an approval or a denial (FR-150). Delivered to
+        the child on a denial (FR-153).
+      properties:
+        note: { type: [string, 'null'], minLength: 1, maxLength: 1000 }
+
+    ApprovalInfoRequest:
+      type: object
+      additionalProperties: false
+      required: [note]
+      description: |
+        The note is required here: asking for more information without saying what is wanted, or
+        replying without saying anything, is not a message (FR-150, FR-153).
+      properties:
+        note: { type: string, minLength: 1, maxLength: 1000 }

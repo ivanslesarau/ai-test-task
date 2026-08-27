@@ -1180,3 +1180,361 @@ Traceability:
 | Fix | Requirements | Plan decision |
 |---|---|---|
 | F7 | FR-019, FR-061, FR-062, SC-014; proposed FR-105, SC-026 | proposed D-07 |
+
+---
+
+## Extension: Parent/Child Family Accounts & the Approval Workflow
+
+**Added**: 2026-08-27 | **Source**: spec.md User Stories 9–13, FR-106 – FR-159, SC-027 – SC-041 |
+**Design**: plan.md §Extension (2026-08-27), research.md Part D (R-34 – R-51), data-model.md §25–§35,
+contracts/openapi.yaml v1.2.0, contracts/frontend-contracts.md §15–§21, quickstart.md US9–US13
+
+Numbering continues from T312; **no existing task is renumbered or altered.**
+
+**Unlike the two previous extensions, this one is not purely additive.** Family Phase A rewrites code
+that exists and passes its tests today: `player_details` is dropped, the trainer association is
+re-pointed from an account to a player profile, and the active context moves to its own table
+(research R-34, R-35, R-36). data-model.md §35 enumerates what that touches — ten backend call sites,
+four frontend modules, thirteen test files — and Family Phase A is that list turned into tasks. A
+reviewer should expect Phase A to change many files and add **no user-visible behaviour**; its proof
+is the existing suite passing against the new shape.
+
+### Format for this phase: `[ID] [P?] [Story] Description`
+
+- **[P]**: Can run in parallel — different files, no dependency on incomplete work
+- **[Story]**: US9 – US13, matching spec.md. Family-Foundational and Family-Polish tasks carry no
+  story label, because every story depends on them
+
+| Story | Spec | Priority | Delivers |
+|---|---|---|---|
+| **US9** | User Story 9, FR-106 – FR-113, FR-122 – FR-123 | P1 | One account holding a whole family, with each child's trainers chosen as the profile is created |
+| **US10** | User Story 10, FR-124 – FR-128 | P1 | A parent adding and removing each child's trainers, with history preserved |
+| **US11** | User Story 11, FR-129 – FR-140 | P2 | A child's own sign-in that can look but not spend, commit, or reach a sibling |
+| **US12** | User Story 12, FR-141 – FR-159 | P2 | The Pending Parent Approval workflow — the story this extension exists to deliver |
+| **US13** | User Story 13, FR-122 (join path) | P3 | The family-member selection prompt when a parent follows a new trainer's link |
+
+**Tests are included**, on the same reasoning as every earlier phase: the constitution makes passing
+tests a merge gate, and SC-028, SC-029, SC-034, SC-038, and SC-040 each name a test as the thing that
+proves them. Two of those — sibling isolation and resolve-exactly-once — cannot be demonstrated by
+hand at all.
+
+---
+
+### Family Phase A: Foundational — the new shape (Blocking Prerequisites)
+
+**Purpose**: Move the trainer association from the account to the player profile, add the approval
+table, and rework every call site that assumed one player per account. **Delivers no new capability.**
+
+**⚠️ CRITICAL**: No task in Family Phases B–E may begin until this phase is complete and the full
+existing suite is green.
+
+**⚠️ VERIFY T320 BEFORE PROCEEDING.** T318 re-points every trainer association in the database. No
+downstream test means anything if it silently dropped rows.
+
+- [ ] T313 Add the `PlayerProfileKind`, `ApprovalRequestKind`, and `ApprovalRequestStatus` `StrEnum`s to `backend/src/app/models/enums.py`, plus an `ALLOWED_APPROVAL_TRANSITIONS` map and `is_approval_transition_allowed()` mirroring the existing `ALLOWED_STATUS_TRANSITIONS` pattern (data-model §25). `info_requested` may not go directly to `approved` — the parent asked a question, so the answer returns the request to pending (FR-143)
+- [ ] T314 [P] Create the `player_profiles` and `active_training_contexts` models in `backend/src/app/models/player_profile.py` per data-model §26 and §27 — the check constraints `ck_player_profiles_kind`, `_gender`, `_self_names`, and `_signin_is_child`; the **partial** unique index `uq_player_profiles_one_self` on `(account_user_id) WHERE kind = 'self'`; the unique index on `sign_in_user_id`; and `(account_user_id, removed_at)`. Record in a docstring that `ck_player_profiles_self_names` is what makes R-37's two name sources unambiguous
+- [ ] T315 [P] Create the `approval_requests` model in `backend/src/app/models/approval.py` per data-model §28 — the check constraints `_kind`, `_status`, `_subject`, `_resolution`, and `_expiry_actor`; the **partial** unique index `uq_approval_requests_live` on `(player_profile_id, kind, trainer_user_id) WHERE status IN ('pending_parent_approval','info_requested')`; and indexes on `(parent_user_id, status)`, `(player_profile_id, status)`, and `(status, expires_at)`. `amount_minor` is an integer of minor currency units, never a float (research R-39)
+- [ ] T316 Add a nullable `player_profile_id` column with its foreign key and index to `TrainerPlayerAssociation` in `backend/src/app/models/association.py`, leaving `player_user_id` in place for now (data-model §29.1). Both coexist until T319
+- [ ] T317 Write Alembic revision `backend/migrations/versions/0008_create_player_profiles_and_approvals.py` creating `player_profiles`, `active_training_contexts`, and `approval_requests` with every check constraint and index from T314–T315, and adding `trainer_player_associations.player_profile_id` as **nullable** (data-model §33). Nothing is dropped and nothing is required, so the application still runs unchanged on this revision
+- [ ] T318 Write Alembic revision `backend/migrations/versions/0009_migrate_players_to_profiles.py` — a **data** migration in SQLAlchemy Core against `op.get_bind()`, never raw SQL, so the two documented exceptions in plan.md §Complexity Tracking stay at two. One `player_profiles` row per `player_details` row (`kind` from `is_self`; names split from `player_name` on the **last space** for a child, `NULL` for a self player, a one-word name becoming the first name with `'—'` as the last); then `player_profile_id` backfilled on every association; then one `active_training_contexts` row per player whose `active_trainer_user_id` was set. Must be idempotent. `downgrade()` restores `player_details` **only** when every account holds exactly one profile and otherwise **raises** — a migration that silently discarded a family's second and third child is worse than one that refuses to run (research R-35)
+- [ ] T319 Write Alembic revision `backend/migrations/versions/0010_finalize_profile_associations.py` — under `batch_alter_table`: make `player_profile_id` non-nullable, drop and recreate `uq_trainer_player` on `(trainer_user_id, player_profile_id)`, drop and recreate `ix_tpa_player_status` on `(player_profile_id, status)`, drop `player_user_id`; then drop the `player_details` table (data-model §29.2, §33). The unique constraint is load-bearing — it is what makes FR-082 and FR-127 caught integrity errors rather than checked preconditions
+- [ ] T320 Extend `backend/tests/integration/test_migration_backfill.py` — assert the association count is identical across `0007 → 0008 → 0009 → 0010`, that every association ends with a non-null `player_profile_id`, that every account with a former context has exactly one `active_training_contexts` row, that `upgrade` run twice is a no-op, and that `0009`'s `downgrade` **raises** for an account holding two profiles. **This is the gate that makes the rest of the phase safe to build on**
+- [ ] T321 [P] Create `backend/src/app/repositories/player_profile_repository.py` — insert, get by id, list live profiles for an account, get by `sign_in_user_id`, soft-remove, and a near-duplicate lookup by account plus date of birth plus case-insensitive trimmed name (data-model §32). Queries only; the duplicate *policy* belongs to the service
+- [ ] T322 [P] Create `backend/src/app/repositories/approval_repository.py` — insert, get by id, list for a parent with status filter and paging, list for a player profile, list lapsed live requests for the sweep, and the **conditional resolve**: a Core `update()` whose `where` clause carries the id, the live statuses, and `expires_at > now`, returning the affected row count (research R-41). The row count is the decision — no read-then-write anywhere in this file
+- [ ] T323 Rework `backend/src/app/repositories/association_repository.py` to profile granularity (data-model §35) — `get`, `insert`, `list_active_for_player`, `list_for_trainer`, and `count_for_trainer` all join on `player_profiles.id` instead of the account id, and `TrainerRosterRow` gains the profile identity, its `kind`, and the responsible account's contact detail for FR-116. Each profile's associations stay wholly independent of every other profile's on the same account (FR-115)
+- [ ] T324 Rework `backend/src/app/repositories/user_repository.py` — `get_role_detail` stops returning `tuple[PlayerDetail, ParentContact | None]` for a `player_parent` and returns the parent contact alone, because the player fields are now per-profile (data-model §35); `insert_join_registration` writes a `player_profiles` row and an `active_training_contexts` row instead of a `PlayerDetail`
+- [ ] T325 Rename `backend/src/app/services/trainer_context_service.py` to `training_context_service.py` and rework all three methods over `active_training_contexts` (data-model §27, research R-36) — `resolve_active_context` returns a validated `(player_profile_id, trainer_user_id)` pair, repairing a stored pair whose profile was removed, whose association is not Active, or whose trainer is not Active; `list_for_account` returns every reachable pair; `switch` validates a named pair. A signed-in child's candidate set is the single profile their sign-in is attached to, a parent's is every live profile on the account (FR-119, FR-132, research R-48). The restored pair is the one last used, falling back to another available pair or to a plain statement that the person belongs to no trainer (FR-117, FR-120)
+- [ ] T326 Rework `backend/src/app/services/join_service.py` — `register` and `accept` write the context to `active_training_contexts` rather than `player_details.active_trainer_user_id`, and `register` creates a `player_profiles` row whose `kind` comes from `is_self` (data-model §35). The family-member selection and the child block are T413 and T376 — this task only moves existing behaviour onto the new shape
+- [ ] T327 Rework `_anonymize_role_detail` in `backend/src/app/services/erasure_service.py` into data-model §30's transformation — every owned profile anonymized (a child's name becomes `Deleted`/`User`, not `NULL`, because the check constraint requires one and the roster must still read "Deleted User"), photos removed, `date_of_birth` cleared, `gender` and `skill_level` retained, `tokens_without_approval` cleared, contexts deleted, live approval requests expired with a null actor, and both note fields cleared. **Includes the cascade**: each child's `sign_in_user_id` account goes through the same anonymization in the same transaction
+- [ ] T328 Rework `_apply_role_detail_updates` and `editable_fields_for` in `backend/src/app/services/profile_service.py` — the player fields `school`, `jersey_number`, and `skill_level` leave the account's role detail, so `player_parent` keeps only the emergency-contact fields here (data-model §35)
+- [ ] T329 Update `build_role_detail_out` in `backend/src/app/schemas/role_detail.py` — `PlayerParentDetail` loses `school`, `jersey_number`, and `skill_level` and gains a read-only `profile_count`, matching `openapi.yaml` v1.2.0 (research R-34, R-49)
+- [ ] T330 Create `backend/src/app/schemas/training_context.py` replacing `trainer_context.py` — `TrainingContextEntry`, `TrainingContextList`, and `TrainingContextRequest` per the contract, both halves of the pair required on the request because a trainer alone no longer identifies a context
+- [ ] T331 Rework `backend/src/app/core/deps.py` — `get_training_context` and `TrainingContextDep` replace `get_trainer_context` and `TrainerContextDep`, returning the validated pair. This dependency is the **only** place an endpoint learns which profile and trainer it is scoped to; no endpoint accepts either as a path or query parameter (research R-25, R-48). The pair is the boundary every player-facing view is scoped to (FR-117). Add the `FamilyServiceDep`, `ApprovalServiceDep`, and `ChildSignInServiceDep` aliases the later phases consume
+- [ ] T332 Rework `_to_current_user` in `backend/src/app/api/v1/auth_router.py` — `CurrentUser` gains `active_player_profile_id` and `is_child_account`, and `trainer_count` becomes `context_count` (contract v1.2.0). `is_child_account` is **derived** from the existence of a profile naming this account, resolved in the same statement that loads the current user rather than as a second query (research R-38)
+- [ ] T333 Replace `GET /me/trainers` and `PUT /me/trainer-context` with `GET /me/contexts` and `PUT /me/context` in `backend/src/app/api/v1/me_router.py`, per the contract. No versioned duplicate is kept (research R-49). The trainer is named in the **request body**, never a path or query parameter, which is what keeps the CI guard meaningful
+- [ ] T334 Reshape the roster response in `backend/src/app/api/v1/trainer_router.py` and `backend/src/app/schemas/trainer_player.py` — `TrainerPlayerSummary` names `player_profile_id` instead of `player_user_id`, carries `kind`, and carries `responsible_contact` so a trainer with a child on their roster can reach the parent (FR-116). It still reveals nothing about any other trainer **or any other profile on the same account** (FR-090, FR-116)
+- [ ] T335 [P] Add the extension's domain errors and HTTP translations to `backend/src/app/core/errors.py` — `player_profile_not_found` (404), `possible_duplicate_profile` (409), `parent_only_field` (403), `child_must_ask_parent` (403), `request_already_resolved` (409), `approval_subject_unavailable` (422), `approval_kind_not_executable` (422), `approval_amount_changed` (422). The profile error carries one message whether the profile belongs to another account or to a sibling — a distinction would confirm the sibling exists (FR-112, FR-132)
+- [ ] T336 [P] Update `frontend/src/shared/api/types.ts` to mirror `openapi.yaml` v1.2.0 exactly — add `PlayerProfileKind`, `PlayerProfile`, `PlayerProfileList`, `PlayerProfileAssociation`, `CreateChildProfileRequest`, `PlayerProfileUpdate`, `DuplicateProfileError`, `AddPlayerTrainerRequest`, `GrantChildSignInRequest`, `ChildSignIn`, `ApprovalRequestKind`, `ApprovalRequestStatus`, `ApprovalRequest`, `ApprovalRequestPage`, `ApprovalDecisionRequest`, `ApprovalInfoRequest`, `JoinSelectableProfile`, `JoinAcceptRequest`, `ResponsibleContact`, `TrainingContextEntry`, `TrainingContextList`, and `TrainingContextRequest`; change `TrainerPlayerSummary`, `PlayerParentDetail`, `JoinResult`, and `CurrentUser`; delete `TrainerContextEntry`, `TrainerContextList`, and `TrainerContextRequest`. Every enum a closed string union, never `string`; no `any`
+- [ ] T337 [P] Widen the `ctx` namespace in `frontend/src/entities/trainer-context/api/query-keys.ts` to `ctxKeys.scope(profileId, trainerId)`, move the trainer's own roster key out to `userKeys.roster(search)`, and replace `userKeys.trainers` with `userKeys.contexts` (frontend-contracts §16, research R-47). The profile dimension is what stops one sibling's cached context data being served to the other; it is a two-line change now and a sweep across every hook after Epic-02
+- [ ] T338 Rework `frontend/src/entities/trainer-context/api/` — `use-contexts.ts` replaces `use-trainers.ts` against `GET /me/contexts`, and `use-switch-context.ts` posts the pair to `PUT /me/context` and still removes the whole `ctxKeys.root` namespace before letting the session refetch settle (research R-26, R-47). Move the roster hook to read `userKeys.roster`
+- [ ] T339 Regroup `frontend/src/widgets/trainer-context-switcher/ui/trainer-context-switcher.tsx` and `trainer-context-label.tsx` by profile per frontend-contracts §19 — `self` entries under "Your Training", `child` entries under "Your Children's Training", each naming the child; no heading for an empty group; **no grouping at all for a child**, whose list is flat (FR-118, FR-119). Visibility is driven by `session.context_count > 1`, exactly as `trainer_count` drove it
+- [ ] T340 [P] Rework `backend/tests/helpers.py` — `create_player_with_detail` becomes `create_player_profile(db_session, *, account, kind='self', **kwargs)`, and add `create_family(db_session, *, children=2, with_sign_in=False)` returning the parent, its profiles, and any child accounts. A factory that still creates one `PlayerDetail` per account is the single biggest source of breakage in this phase
+- [ ] T341 Update the backend suites that encode one player per account — `tests/integration/test_trainer_context.py`, `test_context_repair.py`, `test_trainer_roster.py`, `test_trainer_isolation.py`, the `test_join_*.py` set, `test_erasure_associations.py`, and `test_permission_matrix.py` (data-model §35). **Intent must not change**: every assertion these made about isolation, repair, and erasure must still be made, against a profile instead of an account. An assertion that becomes hard to express is a signal the rework is wrong, not that the assertion should be dropped
+- [ ] T342 [P] Update the frontend tests that encode the old shape — `tests/widgets/trainer-context-switcher.test.tsx` (now grouped by profile), `tests/shared/ctx-namespace.test.ts` (the key gains a dimension), and `tests/pages/join.test.tsx`. Extend the MSW handlers in `tests/msw-handlers.ts` for `/me/contexts` and `/me/context`
+- [ ] T343 [P] Update `backend/tests/contract/test_openapi_contract.py` expectations for `openapi.yaml` v1.2.0 — 51 operations, the replaced context routes gone, and the `family` and `approvals` tags present. This test is what makes R-49's "the contract and the code cannot diverge" true
+- [ ] T344 Run the full quality gate from quickstart.md §6 — ruff, `mypy src` strict, pytest across unit, integration, and contract, ESLint including the boundaries rule, `tsc -b --noEmit` with zero `any`, Vitest — and fix every finding. **The gate passing with no new capability added is this phase's definition of done**
+
+**Checkpoint**: `alembic upgrade head` reaches `0010` and leaves 16 tables; `player_details` is gone;
+every trainer association names a player profile; the switcher groups by profile; and the entire
+pre-existing suite passes unchanged in intent. No new endpoint answers yet beyond the two replaced
+context routes.
+
+---
+
+### Family Phase B: US9 + US10 — Family Profiles and Their Trainers (Priority: P1) 🎯 Family MVP
+
+**Goal**: A parent adds children, chooses which trainers each trains with as the profile is created,
+and changes those associations afterwards.
+
+**Independent test**: Sign in as a parent associated with one trainer, add two children answering yes
+for one and no for the other, and confirm both profiles exist under the one account, only the first is
+on the trainer's roster, and the parent's navigation offers a choice between themselves and each
+child. Then add the second trainer to a child, remove it again, and confirm the roster and the history
+behave as FR-126 and FR-127 require.
+
+**Depends on**: Family Phase A complete.
+
+- [ ] T345 [P] [US9] Create `backend/src/app/schemas/player_profile.py` — `PlayerProfile`, `PlayerProfileList`, `PlayerProfileAssociation`, `CreateChildProfileRequest`, `PlayerProfileUpdate`, `DuplicateProfileError`, and `AddPlayerTrainerRequest`, mirroring `openapi.yaml` v1.2.0. Every nullable string is `str | None` with `min_length=1`; `PlayerProfileUpdate` distinguishes an omitted key from an explicit `null` through `model_dump(exclude_unset=True)` (constitution VI). The field set is FR-107's
+- [ ] T346 [P] [US9] Write `backend/tests/unit/test_family_rules.py` — the age band by kind (self ≥ 18, child 1–18, FR-108), the one-self rule, the `self`-names-must-be-absent rule (R-37), and the near-duplicate predicate: same account, same date of birth, case-insensitive trimmed name match, and **not** a fuzzy match, because siblings named for the same relative must not collide (research R-45). Covers FR-107, FR-109, and FR-110
+- [ ] T347 [US9] Create `backend/src/app/services/family_service.py` — `list_profiles`, `get_profile`, `create_child`, `update_profile`, `remove_profile`. `create_child` runs the duplicate check and raises `possible_duplicate_profile` unless `acknowledge_possible_duplicate` is set, then creates the profile and associates it with exactly the trainers named in `trainer_ids`, each validated as one the account already trains with (FR-122, FR-123). An empty or omitted list creates the profile with no association. Ownership is validated in this service, never in the router (Principle III). FR-110 requires an overrulable **warning**, not a refusal, which is why the 409 carries the matches and an acknowledgement clears it
+- [ ] T348 [US9] Add `GET /me/players` and `POST /me/players` to a new `backend/src/app/api/v1/family_router.py`, registered in `backend/src/app/main.py` under the `/api/v1` prefix with the `family` tag. `POST` is parent-only — a signed-in child cannot own a profile (FR-132); `GET` returns only the caller's own profile when the caller is a child (FR-132)
+- [ ] T349 [US9] Add `GET`, `PATCH`, and `DELETE /me/players/{profile_id}` to `family_router.py` — same file as T348, so these run in sequence. An unreachable profile is **404, not 403**, whether it belongs to another account or to a sibling (FR-112, FR-132). `PATCH` refuses `tokens_without_approval` from a child with `parent_only_field` (FR-132, FR-147) and refuses name fields entirely on a `self` profile (R-37). `DELETE` is a soft removal that also ends any child sign-in (FR-111, FR-135)
+- [ ] T350 [US9] Add `PUT /me/players/{profile_id}/photo` to `family_router.py` — same file as T348–T349, so it runs in sequence. Accepted for the owning parent on any profile and for a child on their own (FR-131), behind the existing `PhotoStorage` port with the same decode-validation, 5 MB limit, and thumbnail generation as a profile photo (FR-034, R-07). A `self` profile has no photo of its own and returns 422 (R-37)
+- [ ] T351 [P] [US9] Write `backend/tests/integration/test_family_profiles.py` — quickstart Story 9 scenarios 9.1–9.13: creation, the three trainer-selection shapes, the age refusals, the duplicate 409 and its override, the account-holder distinction, the 404 for another account's profile, and the 403 for a Trainer attempting to add a child. **Includes racing two `self` profiles concurrently** to prove the partial unique index, which no manual walk can do (SC-027)
+- [ ] T352 [US10] Extend `family_service.py` with `add_trainer` and `remove_trainer` — same file as T347, so these run in sequence. `add_trainer` accepts exactly one of an invitation `code`, validated under the same five-part predicate as any other use of it (FR-070), or a `trainer_id` the account already trains with; adding one already active returns the profile unchanged and writes nothing (FR-125). `remove_trainer` sets the association inactive, preserving every historical record (FR-126); re-adding later reuses the same profile (FR-127)
+- [ ] T353 [US10] Add `POST /me/players/{profile_id}/trainers` and `DELETE /me/players/{profile_id}/trainers/{association_id}` to `family_router.py` — same file as T348–T350, so these run in sequence. Both are parent-only: a child changes no association, including their own (FR-128, FR-132). Removal is addressed by the **association's** identifier, not the trainer's, which is better addressing and keeps `trainer_id` out of path parameters where CI forbids it (research R-48)
+- [ ] T354 [P] [US10] Write `backend/tests/integration/test_family_trainers.py` — quickstart Story 10 scenarios 10.1–10.11: both ways of adding, the 422 for sending both `code` and `trainer_id`, the no-op re-add, removal and the surviving history, the profile reuse on re-add, the last-association empty state, and the 403 for a child attempting either direction
+- [ ] T355 [P] [US9] Create `frontend/src/entities/player-profile/api/query-keys.ts` with `familyKeys` and `frontend/src/entities/player-profile/api/use-players.ts` with the list and detail queries (frontend-contracts §16)
+- [ ] T356 [P] [US9] Create the family mutations in `frontend/src/entities/player-profile/api/` — `use-create-child.ts`, `use-update-player.ts`, `use-remove-player.ts`, and `use-upload-player-photo.ts`, each honouring the invalidation contract in frontend-contracts §16. A removal additionally calls `removeQueries(ctxKeys.root)`, because the active pair may have been the removed profile's
+- [ ] T357 [P] [US10] Create `frontend/src/entities/player-profile/api/use-player-trainers.ts` — the add and remove mutations, invalidating `familyKeys.profile(id)`, `userKeys.contexts`, and the session; removal also drops the `ctx` namespace
+- [ ] T358 [P] [US9] Create `frontend/src/features/family/add-child/` — the TanStack Form with `createChildProfileSchema` (frontend-contracts §17), `validationLogic: revalidateLogic({ mode: 'submit', modeAfterSubmission: 'change' })` and `validators: { onDynamic }` per D-02, the payload routed through the single `normalizeEmptyToNull` helper per D-01, and the trainer question rendered in FR-122's three shapes: one yes/no naming the trainer, a checklist, or nothing at all
+- [ ] T359 [US9] Add the duplicate-confirmation dialog to `frontend/src/features/family/add-child/` — same slice as T358, so it runs after. It reads the matched profiles from the mutation's **409 error state**, never from a store (frontend-contracts §18), and resubmits with `acknowledge_possible_duplicate: true`
+- [ ] T360 [P] [US9] Create `frontend/src/features/family/edit-player/` with `playerProfileUpdateSchema` — name fields present only for a `child` profile, `tokens_without_approval` present only for a parent
+- [ ] T361 [P] [US10] Create `frontend/src/features/family/add-trainer/` with `addPlayerTrainerSchema` — exactly one of `code` or `trainer_id`, enforced by a `.refine` on the object rather than either field, because the rule is about the pair (frontend-contracts §17)
+- [ ] T362 [P] [US10] Create `frontend/src/features/family/remove-trainer/` — a confirmation dialog naming the child and the trainer and stating that upcoming reservations with that trainer will be cancelled (FR-126). The statement is required now; the cancellation itself belongs to Epic-02
+- [ ] T363 [P] [US9] Create `frontend/src/widgets/family-roster-list/` — one row per profile showing name, age, the account-holder marker, and each associated trainer with its join date (FR-124), composing `shared/ui` primitives only
+- [ ] T364 [US9] Create `frontend/src/pages/family/` and `frontend/src/pages/family-player/`, and the routes `frontend/src/routes/_authed/family.tsx` (layout, `player_parent` only), `family/index.tsx`, and `family/$profileId.tsx` per frontend-contracts §15. `$profileId` carries the child's trainers, their sign-in, and their token setting on one view, because FR-124 and FR-128 put all three on one view of one child
+- [ ] T365 [US9] Extend `frontend/src/widgets/app-shell/model/use-nav-items.ts` — `player_parent` stops returning an empty list and yields Family plus Approvals for a parent, or Family plus Requests for a child (frontend-contracts §15). D-07 recorded the empty list as "correct rather than missing" because the feature gave them no page; this slice gives them three, and T308's orphan-route gate is what would otherwise fail
+- [ ] T366 [US9] Add `'/family'`, `'/family/$profileId'`, `'/approvals'`, and `'/requests'` to the `BreadcrumbCrumb` union and `ROUTE_LABELS` in `frontend/src/widgets/app-shell/model/use-breadcrumbs.ts`, and the matching `case` branches to `CrumbLink` in `frontend/src/widgets/app-shell/ui/app-shell.tsx` — same files as T304 and T305, so these run in sequence. The switch is exhaustive, so the union landing without the branches is a compile error
+- [ ] T367 [P] [US9] Write `frontend/tests/pages/family.test.tsx` — the list renders the account holder and children distinctly, the add-child form asks the trainer question in each of its three shapes, and the duplicate dialog appears on a 409 and resubmits with the acknowledgement
+- [ ] T368 [P] [US10] Write `frontend/tests/features/family-trainers.test.tsx` — the add form refuses both-or-neither of `code` and `trainer_id`, and the removal dialog states the reservation consequence before confirming
+
+**Checkpoint**: A parent can build their family and point each child at trainers, reachable by clicking
+from the header. SC-027 and SC-028 are measurable.
+
+---
+
+### Family Phase C: US11 — A Child Signs In and Finds Most Doors Locked (Priority: P2)
+
+**Goal**: A parent can grant a child their own sign-in; that child can look at their own training and
+almost nothing else, and following a new trainer's link reaches the parent instead of enlarging the
+family's commitments.
+
+**Independent test**: Grant a child a sign-in, sign in as that child, and confirm every permitted view
+works and every forbidden action is refused when submitted directly rather than through the interface.
+Then, as the child, follow a third trainer's link and confirm no association is created and the parent
+receives the email.
+
+**Depends on**: Family Phase B complete — a child needs a profile and trainers before a sign-in means
+anything.
+
+- [ ] T369 [P] [US11] Create `backend/src/app/schemas/child_signin.py` — `GrantChildSignInRequest` and `ChildSignIn`, mirroring the contract. `invitation_sent` is a real field, not always true: a failed delivery is never reported as success (FR-064)
+- [ ] T370 [US11] Create `backend/src/app/services/child_signin_service.py` — `grant` creates a `player_parent` account holding the parent-supplied email, links it as `player_profiles.sign_in_user_id`, seeds the child's mandatory `user_profiles` row from the profile per data-model §26.1, and issues a setup invitation through the existing flow (FR-025 – FR-027, FR-129). The email is subject to the platform-wide uniqueness rule, so the parent's own address is refused rather than shared (FR-004). `revoke` clears the link and revokes every session that account holds (FR-134)
+- [ ] T371 [US11] Extend `update_profile` in `backend/src/app/services/family_service.py` so a parent's edit of a child's name writes **both** `player_profiles` and that child's `user_profiles` row in one transaction — same file as T347 and T352, so this runs in sequence. data-model §26.1 makes the profile authoritative and gives the copy exactly one writer; this task is that writer, and nothing else in the codebase may write a child account's `user_profiles` names
+- [ ] T372 [US11] Add `PUT` and `DELETE /me/players/{profile_id}/sign-in` to `family_router.py` — same file as T348–T350 and T353, so these run in sequence. Parent-only, and only for a `child` profile: a `self` profile's sign-in is the account itself (R-37). A duplicate email is 409 `email_already_registered` (FR-129)
+- [ ] T373 [US11] Add the child permission gate to `backend/src/app/core/deps.py` — same file as T331, so it runs after. A `require_parent` dependency refuses a caller whose account is a child sign-in, recording a `permission_denied` audit entry exactly as `require_roles` does (FR-020, FR-133). Every action FR-132 forbids is refused **on the request**, never only by withholding a control (FR-133)
+- [ ] T374 [US11] Suspend a child's access while the parent is not Active — in `backend/src/app/services/auth_service.py`, refuse a sign-in and fail session authentication when the account is a child whose owning parent's status is not Active, and revoke child sessions in the same transaction as a parent's status change in `user_admin_service.py` and `erasure_service.py`. **Derived from the parent's status, never copied onto the child's row**, so reactivation restores access with no separate step (FR-136, research R-50)
+- [ ] T375 [US11] End a child's sign-in when their profile is removed — extend `remove_profile` in `backend/src/app/services/family_service.py` (same file as T347, T352, and T371, so it runs in sequence) to clear `sign_in_user_id` and revoke that account's sessions. A credential must never outlive the player it belongs to (FR-135)
+- [ ] T376 [US11] Block a signed-in child in `backend/src/app/services/join_service.py` — same file as T326, so this runs after. `accept` refuses a child with `child_must_ask_parent`, creating no association and changing nothing about their account (FR-137); `_viewer_state` returns `child_must_ask_parent` from the preview so the join page can explain before the child submits. Raising the request and emailing the parent is T377
+- [ ] T377 [US11] Raise the join request and notify the parent — extend `join_service.py` (same file as T326 and T376, so it runs after both) to create an `approval_requests` row of kind `join_trainer` naming the trainer and the link, and send the parent an email naming the child and the trainer and carrying the link and a review action (FR-138). A second attempt for the same child and trainer raises **no** second request and sends **no** second email — the partial unique index makes the first true and the caught integrity error makes the second (FR-139, research R-40, R-51). A child following the link of a trainer they already train with is simply told so, with no request and no email (FR-140)
+- [ ] T378 [P] [US11] Add `render_child_join_request_email` to `backend/src/app/services/templates/` — subject naming the child and the trainer, body carrying the link and a review action, addressed to the **parent's** address (FR-130, FR-138)
+- [ ] T379 [P] [US11] Write `backend/tests/integration/test_child_signin.py` — quickstart Story 11 scenarios 11.1–11.3 and 11.15–11.18: granting with a fresh email, the 409 for the parent's own address, the setup-link flow through to a working child session, revocation ending sessions while leaving the profile intact, the parent's deactivation suspending the child and reactivation restoring them, and a removed profile ending the sign-in
+- [ ] T380 [P] [US11] Write `backend/tests/integration/test_child_permissions.py` — every action FR-132 forbids, submitted **directly** rather than through the interface: owning a profile, changing any association, adding or removing a payment method, purchasing tokens, completing a purchase without approval, deleting the account, reading the parent's or a sibling's data, and changing `tokens_without_approval`. **This test is SC-029**
+- [ ] T381 [P] [US11] Write `backend/tests/integration/test_sibling_isolation.py` — sweep every context-scoped route with a two-child fixture and assert no response body carries a sibling's data, and that naming a sibling's profile returns 404 rather than 403. **This test is SC-028 and SC-040**, and it is a different failure from the permission matrix and from the existing cross-trainer sweep: "a role cannot reach an action" and "another profile's data never appears in a response" are not the same assertion
+- [ ] T382 [P] [US11] Write `backend/tests/integration/test_child_join_block.py` — quickstart Story 11 scenarios 11.9–11.14: no association created, the parent emailed exactly once however many times the child repeats it, exactly one pending request, and the already-connected case raising nothing. Covers SC-030
+- [ ] T383 [P] [US11] Extend `backend/tests/integration/test_trainer_isolation.py` with a family fixture — a trainer associated with one child sees that child and the responsible parent's contact detail, and **no** sibling on the same account who does not train with them (FR-116, SC-040)
+- [ ] T384 [P] [US11] Create `frontend/src/features/family/grant-sign-in/` with `grantChildSignInSchema` — refuses the signed-in account's own address client-side too, so the common mistake is caught before a round trip, and surfaces `invitation_sent: false` rather than reporting success unconditionally (FR-064, the lesson of D-06)
+- [ ] T385 [US11] Add the child's constrained views — extend `frontend/src/pages/family/` (same slice as T364, so it runs after) so a child sees only their own profile, and hide the controls FR-132 forbids while relying on the server as the actual barrier (FR-133). Add the revoke control to `frontend/src/pages/family-player/`
+- [ ] T386 [US11] Add the blocked-child branch to `frontend/src/pages/join/` — the `child_must_ask_parent` viewer state renders "Ask your parent to register you with this trainer" and states that the parent has been emailed (FR-137). The viewer-state union gains a fifth member and the switch stays exhaustive
+- [ ] T387 [P] [US11] Write `frontend/tests/pages/join-child-block.test.tsx` and extend `frontend/tests/pages/family.test.tsx` — the child's view shows one profile and no parent-only control, and the join page renders the blocked branch
+
+**Checkpoint**: A child can sign in, see their own training, and reach nothing else — proved by
+SC-029's and SC-028's sweeps rather than by inspection. A blocked link reaches the parent.
+
+---
+
+### Family Phase D: US12 — A Parent Approves or Denies What Their Child Asks For (Priority: P2)
+
+**Goal**: The Pending Parent Approval workflow, end to end and demonstrable, driven by the
+join-a-trainer requests Phase C now raises.
+
+**Independent test**: As a child, follow a new trainer's link to raise a request. As the parent, find
+it in the pending list and approve it — confirm the child is associated and sees the status change.
+Repeat with a denial, and a third time letting the clock pass 48 hours, confirming the request expires
+as denied and the child is never associated.
+
+**Depends on**: Family Phase C complete — a request needs an author and a subject.
+
+**Note**: no migration here. `approval_requests` was created in Family Phase A alongside the rest of
+the schema, for the same reason Phase 1 carried four revisions and Phase 7 carried three.
+
+- [ ] T388 [P] [US12] Create `backend/src/app/schemas/approval.py` — `ApprovalRequest`, `ApprovalRequestPage`, `ApprovalDecisionRequest`, and `ApprovalInfoRequest`, mirroring the contract. `ApprovalDecisionRequest.note` is optional and `ApprovalInfoRequest.note` is required; both are `str | None` with `min_length=1` where nullable, so a note box opened and left blank sends `null` rather than `''` (constitution VI)
+- [ ] T389 [P] [US12] Write `backend/tests/unit/test_approval_rules.py` — the full rule matrix: USD always requires approval under every state of `tokens_without_approval` (FR-145); a token spend requires approval when the setting is off and not when it is on (FR-146); the setting is read only at **creation**, so changing it never affects a pending request (FR-147); and every permitted and forbidden status transition from data-model §25, including that `info_requested` cannot go straight to `approved` (FR-143). **This test is SC-035, SC-036, and SC-037**
+- [ ] T390 [US12] Create `backend/src/app/services/approval_executors.py` — an `ApprovalExecutor` `Protocol` carrying the `kind` it handles and a method performing the action, plus a registry and one registered implementation for `join_trainer` that creates the association exactly as a parent adding a trainer would. The two financial kinds are **deliberately unregistered**; a stub that "succeeded" would be the first test asserting money moved when it did not (research R-42, R-46)
+- [ ] T391 [US12] Create `backend/src/app/services/approval_service.py` — `create` (consulting FR-145 and FR-146 to decide whether approval is needed at all, and writing `expires_at` once as `requested_at + 48 hours`), `list_for_parent`, `list_raised_by`, `resolve`, `respond`, and `withdraw`. Resolution goes through the repository's **conditional update**: one row affected means this caller decided it, zero means it was already resolved, withdrawn, or lapsed (research R-41). The predicate also carries the parent's Active status, so FR-157 needs no separate check. No action is carried out while the status is anything but `approved`, and then exactly once (FR-144)
+- [ ] T392 [US12] Add the execution path to `resolve` in `backend/src/app/services/approval_service.py` — same file as T391, so it runs after. An approval resolves the executor for the request's kind and calls it **inside the same transaction** as the status change; a domain error rolls both back, so the request is left live and the parent is told why (FR-151, research R-42). An unregistered kind raises `approval_kind_not_executable` (FR-142, R-46), and an amount that no longer matches what the parent was shown raises `approval_amount_changed` rather than charging the new figure (FR-152)
+- [ ] T393 [US12] Add `expire_lapsed_approval_requests` to `backend/src/app/services/maintenance_service.py` — set every live request past `expires_at` to `expired` with `resolved_at` set and `resolved_by_user_id` **null**, the one resolution with no actor, and notify both the parent and the child (FR-155, research R-43). The sweep notifies; R-41's predicate is what already makes a lapsed request unapprovable, and neither substitutes for the other
+- [ ] T394 [US12] Wire the sweep into `backend/src/app/cli.py` — add it to the existing `prune` subcommand and widen that subcommand's help text to name approval expiry alongside session and attempt pruning. A command whose description omits half its effects is how an operator ends up not scheduling it (research R-43)
+- [ ] T395 [P] [US12] Add the approval email templates to `backend/src/app/services/templates/` — a request raised (naming the child, what is asked, and the amount when financial), a decision taken (carrying the parent's note), an expiry (to both parties), and an informational token-spend notice that asks for no decision. All addressed to the **parent**, except the child's own status notices (FR-130, FR-148, FR-155, R-51)
+- [ ] T396 [US12] Add the audit entries for approval decisions — extend the action vocabulary in `backend/src/app/repositories/audit_repository.py` and write an entry from `approval_service` for every resolution including expiry, naming the child profile, the request, the decision, the actor, any note, and the time (FR-158). Append-only, through the existing insert-only repository and its triggers (FR-055)
+- [ ] T397 [US12] Create `backend/src/app/api/v1/approvals_router.py` with `GET /me/approvals`, `GET /me/approvals/{request_id}`, and the three decision endpoints `approve`, `deny`, and `request-info`, registered in `main.py` with the `approvals` tag. Parent-only; a request belonging to another account's child is 404. The queue defaults to the live statuses because it is a decision queue, not a history (FR-149). Each of the three responses may carry a note (FR-150)
+- [ ] T398 [US12] Add `GET /me/requests`, `POST /me/requests/{request_id}/withdraw`, and `POST /me/requests/{request_id}/respond` to `approvals_router.py` — same file as T397, so these run in sequence. Only the child a request concerns may withdraw or respond; a child attempting to approve their own request is refused (FR-154, FR-156). The child sees every status and the parent's note on a denial or an information request (FR-153)
+- [ ] T399 [P] [US12] Write `backend/tests/integration/test_approval_workflow.py` — quickstart scenarios 12.1–12.12 and 12.18: the request created and having no effect, the parent notified by both channels, approval creating the association and the child seeing it, denial with a note, the information exchange leaving `expires_at` untouched, withdrawal, the child refused approval of their own request, the direct bypass refused, and the audit entry for each decision. Also asserts the parent is notified within a minute and that an approved join reaches the trainer's roster within five seconds (SC-032, SC-033)
+- [ ] T400 [P] [US12] Write `backend/tests/integration/test_approval_concurrency.py` — race two approvals of one request and assert exactly one 200, one 409, and one association; race an approval against the expiry deadline and assert the action happens either fully or not at all. **This test is SC-038**, and it cannot be walked by hand
+- [ ] T401 [P] [US12] Write `backend/tests/integration/test_approval_duplicates.py` — race two creations of the same child-and-trainer request and assert exactly one exists, proving the partial unique index rather than a service check (FR-139, research R-40)
+- [ ] T402 [P] [US12] Write `backend/tests/integration/test_approval_rollback.py` — revoke the trainer's link while a request waits, then approve: assert 422 `approval_subject_unavailable`, the status still **live**, and no association. Then assert a financial kind returns `approval_kind_not_executable` (FR-151, FR-142)
+- [ ] T403 [P] [US12] Write `backend/tests/integration/test_approval_expiry.py` against an **injected clock** — a request past 48 hours is unapprovable before the sweep runs (the predicate) and `expired` with both parties notified after it (the sweep). Assert the information exchange does not restart the deadline. **This test is SC-034**; do not wait two days
+- [ ] T404 [P] [US12] Write `backend/tests/integration/test_approval_parent_inactive.py` — a deactivated parent's pending requests cannot be resolved by anyone, are never auto-approved, and still expire on their original schedule (FR-157, SC-041)
+- [ ] T405 [P] [US12] Create `frontend/src/entities/approval/api/query-keys.ts` with `approvalKeys` and `frontend/src/entities/approval/model/approval-search.ts` with `approvalSearchSchema` (frontend-contracts §16, §17)
+- [ ] T406 [P] [US12] Create the approval queries and mutations in `frontend/src/entities/approval/api/` — `use-approvals.ts`, `use-raised-requests.ts`, `use-resolve-approval.ts`, `use-withdraw-request.ts`, and `use-respond-to-request.ts`. An **approval** invalidates `userKeys.contexts`, the session, and `familyKeys.profiles` as well as `approvalKeys.all`, because it created an association; a denial invalidates only the request (frontend-contracts §16)
+- [ ] T407 [P] [US12] Create `frontend/src/features/approvals/decide/` with `approvalDecisionSchema` and `approvalInfoSchema` — approve, deny, and request-info controls, each able to carry a note, with the payload routed through `normalizeEmptyToNull` so an opened-but-empty note box sends `null` (frontend-contracts §17)
+- [ ] T408 [US12] Handle the 409 in `frontend/src/features/approvals/decide/` — same slice as T407, so it runs after. `request_already_resolved` is an **ordinary outcome**, not an error state: the interface refreshes the queue and says the request was already decided, because a client whose own countdown still shows time remaining can legitimately lose the race (frontend-contracts §18, research R-41)
+- [ ] T409 [US12] Create `frontend/src/pages/approvals/` and `frontend/src/pages/requests/` and the routes `frontend/src/routes/_authed/approvals.tsx` and `frontend/src/routes/_authed/requests.tsx` per frontend-contracts §15. The time remaining is **derived at render** from `expires_at`, never ticked in a store and never treated as authoritative (frontend-contracts §18)
+- [ ] T410 [US12] Add the pending count to the navigation frame — extend `frontend/src/widgets/app-shell/model/use-nav-items.ts` (same file as T365, so it runs after) so the Approvals entry carries a count while any request is pending, which is what makes the workflow reachable by clicking (FR-159, FR-105)
+- [ ] T411 [P] [US12] Write `frontend/tests/pages/approvals.test.tsx` — the queue shows child, subject, amount, and time remaining; approve, deny, and request-info each work and each can carry a note; a 409 refreshes rather than showing an error; and the derived countdown does not disable the controls
+- [ ] T412 [P] [US12] Write `frontend/tests/pages/requests.test.tsx` — a child sees their own requests and their statuses, the parent's note on a denial, and can withdraw a pending one
+
+**Checkpoint**: The whole Pending Parent Approval workflow runs end to end on join requests.
+SC-031 – SC-039 and SC-041 are measurable.
+
+---
+
+### Family Phase E: US13 & Polish — Cross-Cutting Concerns (Priority: P3)
+
+**Goal**: The family-member selection prompt, then the sweeps and gates that hold the whole extension
+together.
+
+**Depends on**: Family Phases B–D complete.
+
+- [ ] T413 [US13] Add the family-member selection to `backend/src/app/services/join_service.py` — same file as T326, T376, and T377, so this runs after all three. `preview` returns `choose_family_members` with `selectable_profiles` when the caller is a parent holding at least one child, each flagged `already_associated` (FR-122, Story 13); `accept` associates exactly the profiles named, ignoring those already connected so the link's use count rises by the number of **new** associations only (FR-068, FR-082). Selecting nobody associates nobody and changes nothing. An account holding exactly one profile may send no body, preserving the 1.1.0 behaviour
+- [ ] T414 [US13] Add `JoinSelectableProfile` and `JoinAcceptRequest` to `backend/src/app/schemas/join.py`, and set the active context after a multi-profile join to the account holder's profile when it was selected and otherwise the first selected child (Story 13 scenario 6)
+- [ ] T415 [P] [US13] Write `backend/tests/integration/test_join_family_selection.py` — quickstart Story 13 scenarios 13.1–13.9: the question offered only when children exist, exactly the selected profiles associated, the use count rising by exactly the number of new associations, the empty selection changing nothing, the no-children case unchanged from US7, already-connected profiles unselectable and free, and the resulting active context
+- [ ] T416 [P] [US13] Create the family-member picker in `frontend/src/features/join/accept/` with `joinAcceptSchema` — the selection lives in the form, not a store (frontend-contracts §18); already-associated profiles render as connected and unselectable; an empty selection is a valid submission
+- [ ] T417 [US13] Add the `choose_family_members` branch to `frontend/src/pages/join/` — same page as T386, so it runs after. The viewer-state union gains its sixth member and the switch stays exhaustive
+- [ ] T418 [P] [US13] Write `frontend/tests/pages/join-family-selection.test.tsx` — the picker lists the account holder and every child, marks the already-connected ones, and submits an empty selection without error
+- [ ] T419 [P] Extend `backend/tests/integration/test_permission_matrix.py` with every route this extension adds — each of the 20 new operations against all four roles **and** against a child account, which is a fifth caller shape the matrix has never had (SC-002, FR-133)
+- [ ] T420 [P] Write `backend/tests/integration/test_erasure_family.py` — erasing a parent anonymizes every owned profile, cascades to each child's sign-in account, expires live requests with a null actor, clears both note fields, leaves every association intact, and leaves participant counts and revenue sums numerically identical (data-model §30, FR-047, SC-008)
+- [ ] T421 [P] Extend `frontend/tests/routes/entry-points.test.tsx` — the four new authenticated paths are each reachable by clicking for at least one role, with no new allow-list entry. A route added with no entry point fails here, which is the gate D-07 put in place (SC-026, FR-105)
+- [ ] T422 [P] Add the family grep gate to `quickstart.md` §Quality gates — family accounts and to CI in `.github/workflows/` — `grep -rn "player_profile_id" backend/src/app/api/ | grep "Query("` must be empty. Ownership is validated in the service against the caller, never selected by the caller (research R-48). The existing `trainer_id` guard stays exactly as it is; this extension is the reason it matters more, not less
+- [ ] T423 [P] Add an `isChildAccount` predicate to `frontend/src/entities/session/model/role-guards.ts` reading the derived session field, and use it wherever a parent-only control is rendered. A predicate, never an inline `session.is_child_account &&`, so the rule has one home
+- [ ] T424 Run the full quality gate from quickstart.md §6 — ruff, `mypy src` strict, pytest across unit, integration, and contract, ESLint including the boundaries rule, `tsc -b --noEmit` with zero `any`, Vitest — plus all four greps, and fix every finding introduced by T313–T423
+- [ ] T425 [P] Apply the PATCH amendment to `.specify/memory/constitution.md` removing the stale `TODO(NULL_NORMALIZATION_HELPER)` — `frontend/src/shared/lib/normalize-payload.ts` exists, is the single normalizer, and is covered by `frontend/tests/shared/normalize-payload.test.ts`; D-01 delivered it and the bug-fix slice recorded it as discharged, but the constitution's own text was never updated. Bump to **1.1.1** and record the correction in the sync-impact comment. Leaving the TODO in place teaches the next reader that Principle VI is unimplemented
+- [ ] T426 [P] Add `seed-demo-family` to `backend/src/app/cli.py` — same file as T394, so it runs after. Creates a parent with a `self` profile, two children (one with a sign-in, one without), and one pending `join_trainer` request, printing the parent's and the child's credentials and the profile ids (data-model §34). The quickstart's US9–US12 walks need a family with a pending request, and building one by hand means signing in as a child, following a link, and signing back in as the parent before any assertion can be made
+- [ ] T427 Walk quickstart.md's US9–US13 tables by hand against a running server and record any divergence as a new task rather than a silent fix — 72 scenarios across five stories. The two things this catches that no test does: that `prune` actually delivers both expiry emails, and that every new page is reachable without typing a URL
+
+**Checkpoint**: The extension is complete. Every one of FR-106 – FR-159 has an implementing task, and
+SC-027 – SC-041 are each measured by a named test or a walked scenario.
+
+---
+
+### Family: Dependencies & Execution Order
+
+**Phase order is strict**: A → B → C → D → E. Unlike the 2026-08-26 extension, whose stories were
+largely independent, these form a chain:
+
+- **A** blocks everything. It re-points a foreign key that ten backend call sites read.
+- **B** needs A — a profile must exist before it can be managed.
+- **C** needs B — a child needs a profile and trainers before a sign-in means anything.
+- **D** needs C — a request needs an author and a subject, which are the child and the blocked link.
+- **E** needs B, C, and D — the picker touches the join path C changed, and the sweeps cover all of it.
+
+**Within Phase A** the order is: T313 → T314–T315 (parallel) → T316 → T317 → T318 → T319 →
+**T320 (verify)** → T321–T322 (parallel) → T323 → T324 → T325 → T326 → T327 → T328 → T329 → T330 →
+T331 → T332 → T333 → T334 → T335 → T336–T337 (parallel) → T338 → T339 → T340 → T341 → T342–T343
+(parallel) → T344.
+
+**Do not proceed past T320 on a red result.** Everything after it assumes the association table was
+migrated without loss.
+
+### Family: Same-File Serialization
+
+Additions to the existing lists; these must not be parallelized:
+
+- `backend/src/app/models/enums.py` — T313 (and T205)
+- `backend/src/app/models/association.py` — T316 (and T207)
+- `backend/src/app/services/family_service.py` — T347, T352, T371, T375 **in that order**
+- `backend/src/app/services/join_service.py` — T326, T376, T377, T413 **in that order** (and T236–T238)
+- `backend/src/app/services/approval_service.py` — T391, T392 in that order
+- `backend/src/app/api/v1/family_router.py` — T348, T349, T350, T353, T372 **in that order**
+- `backend/src/app/api/v1/approvals_router.py` — T397, T398 in that order
+- `backend/src/app/core/deps.py` — T331, T373 in that order (and T226, T264)
+- `backend/src/app/cli.py` — T394, T426 in that order
+- `backend/src/app/api/v1/me_router.py` — T333 (and T230, T265, T280)
+- `backend/src/app/services/erasure_service.py` — T327, T374 in that order
+- `frontend/src/widgets/app-shell/model/use-nav-items.ts` — T365, T410 in that order (and T301)
+- `frontend/src/widgets/app-shell/model/use-breadcrumbs.ts` — T366 (and T200, T304)
+- `frontend/src/widgets/app-shell/ui/app-shell.tsx` — T366 (and T201, T268, T303, T305)
+- `frontend/src/widgets/trainer-context-switcher/` — T339 (and T267, T307)
+- `frontend/src/pages/join/` — T386, T417 in that order (and T247)
+- `frontend/src/pages/family/` — T364, T385 in that order
+- `frontend/src/features/family/add-child/` — T358, T359 in that order
+- `frontend/src/features/approvals/decide/` — T407, T408 in that order
+- `frontend/src/shared/api/types.ts` — T336 (and T222)
+- `frontend/src/entities/trainer-context/api/query-keys.ts` — T337 (and T223)
+- `frontend/tests/pages/family.test.tsx` — T367, T387 in that order
+
+### Family: Parallel Example — Phase A, after the migration is verified
+
+```bash
+# The two new repositories are independent files:
+T321  backend/src/app/repositories/player_profile_repository.py
+T322  backend/src/app/repositories/approval_repository.py
+
+# And the two frontend foundational files touch nothing the backend rework touches:
+T336  frontend/src/shared/api/types.ts
+T337  frontend/src/entities/trainer-context/api/query-keys.ts
+```
+
+### Family: Parallel Example — Phase D tests
+
+```bash
+# All six approval test files are independent, sharing only conftest fixtures:
+T399  backend/tests/integration/test_approval_workflow.py
+T400  backend/tests/integration/test_approval_concurrency.py     # SC-038
+T401  backend/tests/integration/test_approval_duplicates.py
+T402  backend/tests/integration/test_approval_rollback.py
+T403  backend/tests/integration/test_approval_expiry.py          # SC-034
+T404  backend/tests/integration/test_approval_parent_inactive.py
+```
+
+### Family: Implementation Strategy
+
+**Family MVP = Family Phase A + Family Phase B.** That delivers one account holding a family with each
+child pointed at trainers — US9 and US10, both P1 — and is independently demonstrable. Phase A alone is
+not a deliverable: it changes the shape and adds no capability, so shipping it on its own would be a
+migration with nothing to show for it.
+
+**The headline workflow needs Phases C and D.** US12 is what this extension exists for, and it cannot
+be demonstrated without a child able to sign in and raise a request. If the slice has to be cut, cut
+Phase E — US13 is a convenience, since a parent can reach the same outcome through Phase B's family
+page — never Phase C or D.
+
+**Phase A will look alarming in review.** Expect many changed files, no new behaviour, and a diff
+dominated by tests being updated. The correct review question is not "what does this add" but "does
+every assertion the old tests made still get made". T341 exists to make that answerable.
+
+### Family: Traceability
+
+| Story | Requirements | Success criteria | Key tests |
+|---|---|---|---|
+| Foundation | FR-114 – FR-121 | — | T320 (migration), T344 (regression gate) |
+| US9 | FR-106 – FR-113, FR-122, FR-123 | SC-027 | T346, T351 |
+| US10 | FR-124 – FR-128 | SC-028 | T354 |
+| US11 | FR-129 – FR-140 | SC-029, SC-030 | T380, T381, T382 |
+| US12 | FR-141 – FR-159 | SC-031 – SC-039, SC-041 | T389, T399 – T404 |
+| US13 | FR-122 (join path), FR-068, FR-082 | SC-019 (re-checked) | T415 |
+| Cross-cutting | FR-116, FR-133, FR-047 | SC-002, SC-008, SC-026, SC-040 | T419, T420, T421 |
+
+### Family: Open decisions to raise before implementation
+
+Carried from plan.md §Open dependencies. None blocks Phase A, but the first blocks Phase B.
+
+1. **T318's `player_name` split heuristic needs a decision against real data** — split on the last
+   space, with a one-word name becoming the first name and `'—'` the last. Acceptable for a migration,
+   but only a database with real families can confirm it. If it is not acceptable, the fix is to prompt
+   for the split rather than guess, which is a task, not a redesign.
+2. **`prune` must be scheduled at deployment** (T394). Hourly is sufficient. Not testable, which is
+   why it is written down: the correctness guarantee does not depend on it, only the notification.
+3. **FR-142's financial kinds cannot be closed here** (T390). If a working purchase approval is
+   required now, Epic-02's events and Epic-05's payments must come into scope with it — a spec
+   decision, not a plan one. The registry means that decision costs two executor registrations.

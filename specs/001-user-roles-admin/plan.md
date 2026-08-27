@@ -29,6 +29,14 @@ Technical Context, Constitution Check, structure, sequence, and recorded judgeme
 [§Extension](#extension-2026-08-26-sharelink-onboarding-multi-trainer--portal-branding) at the end of
 this document; everything above it describes the already-implemented foundation and is unchanged.
 
+**The 2026-08-27 extension** adds family accounts: one account holding several players (P1), the
+parent's control over each child's trainers (P1), a child's own constrained sign-in (P2), the Pending
+Parent Approval workflow (P2), and the family-member selection prompt when a parent joins a new
+trainer (P3). It is the first extension that **changes structures the earlier slices already
+implemented** — a trainer association moves from naming an account to naming a player profile — and
+it is planned in
+[§Extension (2026-08-27)](#extension-2026-08-27-family-accounts-child-sign-in--the-approval-workflow).
+
 ## Technical Context
 
 **Language/Version**: Python 3.13 (backend), TypeScript 5.7 in `strict` mode (frontend)
@@ -562,3 +570,241 @@ players see it in the right context, the join page is branded, and the platform 
 everywhere else. The coach audience is one function branch away and is marked as such. If the coach
 half is required in this slice, the coach-to-trainer link has to come into scope with it — that is a
 spec decision, not a plan one.
+
+---
+
+## Extension (2026-08-27): Family Accounts, Child Sign-In & the Approval Workflow
+
+**Spec basis**: User Stories 9–13, FR-106 – FR-159, SC-027 – SC-041.
+**Phase 0**: [research.md](./research.md) Part D, R-34 – R-51.
+**Phase 1**: [data-model.md](./data-model.md) §25–§35,
+[contracts/openapi.yaml](./contracts/openapi.yaml) v1.2.0,
+[contracts/frontend-contracts.md](./contracts/frontend-contracts.md) §15–§21,
+[quickstart.md](./quickstart.md) US9–US13.
+
+### Summary of the extension
+
+An account stops being one player and becomes a family. A parent adds children, decides which
+trainers each child trains with, and may give a child their own way in — a sign-in that can look but
+not spend, not commit, and not reach a sibling. Anything a child asks for that costs money or changes
+who they train with stops and waits at **Pending Parent Approval** until the parent approves, denies,
+asks a question, or lets the 48-hour clock run out.
+
+**The structural change comes first, and it is the bulk of the work.** `player_details.user_id` is a
+primary key that asserts one player per account, and FR-106 removes that assertion. So
+`player_profiles` replaces it with a surrogate key, `trainer_player_associations` is re-pointed at the
+profile, and the active context moves to a table keyed by the *viewer* rather than the player.
+[data-model.md](./data-model.md) §35 lists the ten backend call sites, four frontend modules, and
+thirteen test files that encode the old shape — that list, not the four table changes, is the honest
+size of this slice, and it is why Phase 11 exists.
+
+Five decisions carry most of the weight, each argued in `research.md`:
+
+- **The migration is three revisions, and its downgrade refuses to lose data** (R-35). Structure,
+  then data, then constraints — because SQLite rebuilds a table for every `ALTER COLUMN` and
+  `DROP CONSTRAINT`, and a rebuild racing a backfill leaves a schema neither `upgrade` nor
+  `downgrade` describes. Revision 9's downgrade raises rather than silently discarding a parent's
+  second and third child.
+- **The approval workflow is one generic mechanism with an executor registry** (R-39, R-42). Three
+  kinds, one table, typed subject columns rather than a JSON payload. Approval performs the action in
+  the same transaction, so a failure leaves the request live instead of approved-but-undone.
+- **Two guarantees are pushed into the schema rather than the service** (R-40, R-41). A partial unique
+  index makes "one live request per child and subject" true by construction; a single conditional
+  `UPDATE` whose row count *is* the decision makes "resolved exactly once" true without a lock, and
+  folds the expiry race and the non-Active-parent rule into the same predicate.
+- **Expiry needs two mechanisms, not one** (R-43). The predicate makes a lapsed request unapprovable
+  immediately; the existing `prune` subcommand materializes the status and sends the two
+  notifications FR-155 requires. Neither substitutes for the other, and the second is an operational
+  obligation this plan records rather than assumes.
+- **Sibling isolation rides the context dependency** (R-48). R-25 kept `trainer_id` out of every
+  endpoint so that a forgotten check could not become a cross-tenant read; FR-117 adds a second axis
+  with a nastier failure mode, because a sibling is on the *same account* and passes any ownership
+  check that stops at the account.
+
+### Technical Context — what changed
+
+**Dependencies**: **none added**, for the third slice running. The two places that might have pulled
+one in are scheduling (R-43, answered by the `prune` subcommand that already exists) and
+money-handling (R-39, answered by an integer of minor units, since this slice stores amounts and
+executes none). The locked stack is untouched, so no constitution amendment is required.
+
+**Storage**: three new tables — `player_profiles`, `active_training_contexts`, `approval_requests` —
+one table **dropped** (`player_details`), and one existing table's foreign key re-pointed
+(`trainer_player_associations`). Two of the new indexes are **partial**, which is the first use of
+that feature in this schema and is what moves two correctness rules out of service code (R-40, R-41).
+
+**Performance goals**: a child added and placed with a trainer in under 2 minutes (SC-027); a parent
+notified within 1 minute of a request and able to decide in under 1 more (SC-032); an approved join
+on the trainer's roster within 5 seconds (SC-033); child sessions stopped within 1 minute of the
+parent's deactivation (SC-041, immediate by construction — the same in-transaction revocation
+data-model §5 already uses). The family list is deliberately **not paged**: a family is small, and
+FR-124 asks for the whole list at once.
+
+**Constraints**: unchanged, plus two new classes of test that must not be treated as optional. The
+**sibling isolation sweep** (SC-028, SC-040) is not covered by the permission matrix or by the
+existing cross-trainer sweep — "a child cannot reach an action" and "a sibling's data never appears in
+a response body" are different failures, and so are "another trainer's data" and "another profile on
+the same account". The **migration verification** (data-model §33) is the other: revision 9 re-points
+every association in the system, and no downstream test is meaningful if it silently dropped rows.
+
+**Scale/Scope**: 51 API operations (33, less the 2 replaced context routes, plus 20 new); 16 database
+tables (14 + 3 new − `player_details`); thirteen frontend routes plus four layout routes; 159
+functional requirements.
+
+### Constitution Check — re-evaluated for the extension
+
+Evaluated against `.specify/memory/constitution.md` v1.1.0.
+
+| Principle | Verdict | How the extension satisfies it |
+|---|:---:|---|
+| I. Spec-Driven Development | PASS | `spec.md` was extended and validated before these artifacts, which contain no functional code. The principle is most visible where it *costs* something: the USD and token approval kinds are specified but deliberately **not executable**, because their execution is Epic-05's spec, and a stub that "succeeded" would be code ahead of an approved spec (R-46). |
+| II. End-to-End Type Safety | PASS | Three new closed enums (`PlayerProfileKind`, `ApprovalRequestKind`, `ApprovalRequestStatus`), so the parent's queue and the switcher's grouping branch exhaustively at compile time. The approval subject is **typed nullable columns with check constraints**, explicitly not a JSON blob — the untyped-dict shape Principle II exists to exclude (R-39). New Pydantic V2 models; Zod mirrors tabulated in `frontend-contracts.md` §17. |
+| III. Layered Backend Architecture | PASS | Four new services — `family_service`, `child_signin_service`, `approval_service`, `training_context_service` (renamed from `trainer_context_service`) — over two new repositories, plus `approval_executors.py` holding the registry and no queries. The context pair is resolved in a `Depends` (`get_training_context`), the same shape R-14 gives the role gate, so neither a router nor a repository decides isolation (R-48). |
+| IV. Feature-Sliced Frontend | PASS | New slices assigned in `frontend-contracts.md` §15–§17. **The Zustand store gains nothing**, which took deciding: the expiry countdown is derived at render from `expires_at` rather than ticked in a store, and the duplicate-child dialog reads the 409 from mutation error state rather than copying it (§18). Server state stays owned by TanStack Query throughout. |
+| V. Async-First & Contained Failures | PASS | No new raw SQL: revision 9's data migration is Core constructs against `op.get_bind()`, exactly as revision 7 was, so **the two documented exceptions stay at two** and the CI grep on `.execute("` still passes. R-41's conditional update is a Core `update()` with a `where` clause. FR-090's and FR-132's single 404 for several distinct causes is contained-failure behaviour applied to a new surface — a sibling must not be confirmed to exist. |
+| VI. Null-Not-Empty Data Contract | PASS | Every new nullable string is `str \| None` with `min_length=1`; `PlayerProfileUpdate` and `PortalBrandingUpdate` share the same `model_dump(exclude_unset=True)` semantics, so an omitted key differs from an explicit `null`. The two approval note fields are the sharpest case and are called out in `frontend-contracts.md` §17: a parent who opens the note box, types nothing, and approves must send `null`, not `''`. All new forms route through the existing single `normalizeEmptyToNull` helper — no second normalizer. |
+| Stack constraints | PASS | **Zero dependencies added.** Three new Alembic revisions (data-model §33). No component holds a colour literal; nothing in this slice touches theming. |
+| Workflow & quality gates | PASS | `quickstart.md` gains the sibling isolation sweep, the child permission sweep, three concurrency races, the migration verification, the family erasure check, and one grep; the permission matrix gains every new route. |
+
+**Gate result: PASS.** No new violations, no new exceptions, no amendment needed.
+
+**One housekeeping correction, not a gate failure**: the constitution's standing
+`TODO(NULL_NORMALIZATION_HELPER)` says the frontend "has no shared empty-string-to-null helper yet"
+and that existing forms must be migrated onto one. That TODO is **stale** —
+`frontend/src/shared/lib/normalize-payload.ts` exists, is the single normalizer, and is covered by
+`tests/shared/normalize-payload.test.ts`; D-01 delivered it and the bug-fix slice's Constitution Check
+already recorded it as discharged. The constitution's own text was never updated. Correcting it is a
+PATCH-level amendment to `.specify/memory/constitution.md` and is listed as a task rather than done
+here, because this document is not the place to edit the constitution.
+
+### Project Structure — files the extension adds
+
+```text
+backend/src/app/
+├── models/
+│   ├── player_profile.py             # player_profiles, active_training_contexts
+│   ├── approval.py                   # approval_requests
+│   └── role_details.py               # − PlayerDetail (removed with revision 10)
+├── schemas/
+│   ├── player_profile.py             # profile read/create/update, duplicate-match error
+│   ├── child_signin.py
+│   ├── approval.py                   # request read, decision, info exchange, page
+│   └── training_context.py           # replaces trainer_context.py
+├── repositories/
+│   ├── player_profile_repository.py
+│   └── approval_repository.py        # incl. the conditional-resolve update (R-41)
+├── services/
+│   ├── family_service.py             # profiles, their trainers, the duplicate check (R-45)
+│   ├── child_signin_service.py       # grant, revoke, and the derived "is a child" (R-38)
+│   ├── approval_service.py           # create, resolve, expire
+│   ├── approval_executors.py         # the registry; one implementation (R-42, R-46)
+│   ├── training_context_service.py   # renamed; resolve-and-repair over the pair (R-36)
+│   └── maintenance_service.py        # + expire_lapsed_approval_requests (R-43)
+├── core/deps.py                      # get_training_context replaces get_trainer_context
+├── cli.py                            # prune: + approval expiry, widened help text
+└── api/v1/
+    ├── family_router.py              # /me/players…
+    ├── approvals_router.py           # /me/approvals…, /me/requests…
+    ├── me_router.py                  # /me/contexts, /me/context replace the two trainer routes
+    ├── join_router.py                # + family-member selection, + child blocking
+    └── trainer_router.py             # roster reshaped to profiles
+
+backend/migrations/versions/
+├── 0008_create_player_profiles_and_approvals.py
+├── 0009_migrate_players_to_profiles.py            # Core constructs; downgrade refuses to lose data
+└── 0010_finalize_profile_associations.py          # batch_alter_table; drops player_details
+
+frontend/src/
+├── routes/_authed/
+│   ├── family.tsx  family/index.tsx  family/$profileId.tsx
+│   ├── approvals.tsx                 # parent's decision queue
+│   └── requests.tsx                  # a child's own requests
+├── pages/{family,family-player,approvals,requests}/
+├── widgets/
+│   ├── trainer-context-switcher/     # regrouped by profile (frontend-contracts §19)
+│   ├── family-roster-list/
+│   └── app-shell/model/use-nav-items.ts   # player_parent stops returning []
+├── features/
+│   ├── family/{add-child,edit-player,add-trainer,remove-trainer,grant-sign-in}/
+│   ├── approvals/decide/
+│   └── join/accept/                  # + the family-member picker
+└── entities/
+    ├── player-profile/               # familyKeys, profile queries
+    ├── approval/                     # approvalKeys, queue and raised queries
+    └── trainer-context/              # ctxKeys widened to (profileId, trainerId)
+```
+
+`routes/_authed/requests.tsx` and `routes/_authed/approvals.tsx` are separate routes rather than one
+filtered view because they serve different callers: a child sees what they asked for, a parent sees
+what they must decide, and merging them would put a role branch inside a page instead of in the
+navigation descriptor list D-07 established.
+
+### Implementation Sequence — phases 11 to 15
+
+| Phase | Delivers | Backend | Frontend | Proves |
+|---|---|---|---|---|
+| 11 | **Foundation** — the new shape, no new capability | Revisions 8–10; `player_profiles`, `active_training_contexts`, `approval_requests`; the §35 repository and service rework; `get_training_context` | `ctxKeys` widened; `/me/contexts` wired; switcher regrouped; types regenerated | Revision 9 verified; **the entire existing suite green on the new shape** |
+| 12 | **US9 + US10** — family profiles and their trainers | `/me/players` CRUD, photo, add and remove trainer, the duplicate 409 | `/family` and `/family/$profileId` | SC-027, SC-028 |
+| 13 | **US11** — child sign-in and the blocked link | Grant and revoke sign-in; the child permission gate; join blocking that raises a request | Child views, nav entries, empty states | SC-029, SC-030 |
+| 14 | **US12** — the approval workflow | `approval_service`, the executor registry, the conditional resolve, the expiry sweep, notifications | `/approvals`, `/requests`, the pending count | SC-031 – SC-039, SC-041 |
+| 15 | **US13 + hardening** | Family-member selection on `accept` | The picker on the join page | SC-019 re-checked, full suite green |
+
+**Phase 11 is the one phase in this whole plan that demonstrates nothing new, and that is deliberate
+rather than an oversight.** Every other phase in this document maps to a story's Independent Test.
+Phase 11 maps to none: it re-points a foreign key that ten backend call sites and four frontend
+modules read. Splitting it across Phases 12–14 was considered and rejected — each story would then
+carry part of one migration, the schema would sit half-migrated between phases, and the association
+table would have to answer to both `player_user_id` and `player_profile_id` for three phases. Its
+proof is therefore regression rather than demonstration: **the existing suite, unchanged in intent,
+passing against the new shape.** A reviewer should expect Phase 11 to change many files and add no
+user-visible behaviour, and should treat any *new* capability appearing in it as scope leaking out of
+Phase 12.
+
+Phases 12 and 13 both precede the approval workflow because a request needs a child, a trainer, and a
+sign-in before it has a subject or an author. Phase 14 then adds no schema — `approval_requests` was
+created in Phase 11 alongside the rest of the migration, for the same reason Phase 1 carried four
+revisions and Phase 7 carried three: they are one schema change, and splitting them creates revisions
+that exist only to be superseded.
+
+### Complexity Tracking — extension
+
+**No new deviations from the constitution.** The two raw-SQL exceptions stand at two, no dependency
+was added, and no amendment is needed. What follows are judgements and known gaps a reviewer should
+see stated rather than discover — the same practice as the erasure judgement above and the three
+recorded for the 2026-08-26 slice.
+
+| Judgement | What it is | Why, and what would change it |
+|---|---|---|
+| **This extension is not additive** | Every earlier slice could say "no existing column changes type or nullability". This one drops a table, re-points a foreign key, and swaps a unique constraint. | FR-106 removes the assertion that `player_details.user_id` — a primary key — encodes. There is no additive way to hold "one account, several players, each with their own trainers" in a table keyed by account (R-34). The blast radius is enumerated in data-model §35 rather than left for implementation to find. |
+| **Revision 9's downgrade raises instead of reversing** | `alembic downgrade` fails for any account holding more than one profile. | A clean reversal is impossible in principle: three children do not fit in a table keyed by account. The alternatives are refusing loudly or discarding data silently, and a migration that quietly loses two of a family's three children is the worse failure. Asserted by a test (data-model §33). |
+| **A child's name is stored twice** | `player_profiles` holds it, and so does the `user_profiles` row every account is required to have. | §3 makes `user_profiles` mandatory with non-null names, and a child *without* a sign-in has no `users` row, so the profile must hold the name regardless. Contained by making the profile authoritative, giving the copy exactly one writer, and having nothing read it (data-model §26.1). Relaxing `user_profiles.first_name` to nullable would weaken an invariant all four roles rely on, for one case. |
+| **The financial approval kinds ship unexecutable** | `usd_payment` and `token_spend` exist in the enum, the columns, and the rules; approving either returns 422. | FR-142 requires the rules and data now and puts execution in Epic-05, and its last clause forbids marking such a request approved before the act can be performed. A stub that succeeded would be the first test asserting money moved when it did not (R-46). **This is a known gap between FR-142 as written and what ships**, closed by Epic-05 registering two executors. |
+| **Expiry notification is an operational dependency** | Requests become unapprovable on time by construction, but the "your request expired" email waits for `python -m app.cli prune`. | The locked stack has no scheduler and the application registers no background task; adding either would be a dependency or a lifespan hook for one job that `cron` already schedules (R-43). The obligation is recorded in `quickstart.md` §Quality gates — family accounts, because no test can catch an unscheduled cron job. |
+| **1.2.0 breaks the contract on purpose** | `PlayerParentDetail` loses fields, the roster changes shape, and two `/me` operations are replaced rather than deprecated. | The only consumer is this repository's own frontend, shipping in the same commit, and the contract test fails the build on divergence. A parallel v1 shape would mean two serializers kept in step for no external caller; `/api/v2` would leave a permanent scar for a migration that costs nothing today (R-49). |
+| **A child's `gender` survives erasure; their `date_of_birth` does not** | Matching §20's treatment of the account holder. | For a one-child family the surviving classification is weakly identifying alongside a trainer's roster. Clearing it costs Epic-02 its age-and-gender grouping over historical events, which FR-047 protects. Same caveat, same one-line fallback as §10's `business_name` judgement — and the spec already flags this family of questions for legal review. |
+
+**Still open from the previous slice, unchanged**: the coach half of FR-101 remains unimplemented
+until US-01.08 establishes which trainer a coach works for (R-33). This extension neither closes nor
+worsens it.
+
+### Open dependencies to raise before implementation
+
+1. **Revision 9 must be verified against production-shaped data before Phase 12 begins.** It re-points
+   every trainer association in the system. The plan's verification point is
+   `test_migration_backfill.py` (data-model §33), but a database with real families is the only place
+   the `player_name` split heuristic — split on the last space; a one-word name becomes the first name
+   and the last name becomes `—` — can be judged acceptable. If it is not, the fix is to prompt for
+   the split rather than guess, which is a task, not a redesign.
+
+2. **`prune` must be scheduled at deployment.** Not a code dependency and not testable, which is
+   exactly why it is listed. Hourly is sufficient; the correctness guarantee does not depend on it,
+   only the notification (R-43).
+
+3. **FR-142's financial kinds cannot be closed in this slice.** If the client requires a working
+   purchase approval now, Epic-02's events and Epic-05's payments have to come into scope with it —
+   that is a spec decision, not a plan one, and the mechanism is built so that decision costs two
+   executor registrations rather than a redesign.
+
+4. **The constitution's stale `TODO(NULL_NORMALIZATION_HELPER)` should be corrected** as a PATCH
+   amendment. The helper it asks for exists; leaving the TODO in place teaches the next reader that
+   Principle VI is unimplemented.

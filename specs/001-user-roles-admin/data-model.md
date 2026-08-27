@@ -625,3 +625,433 @@ The bootstrap Super Admin command is unchanged. For local work and for the quick
 the seed path additionally creates one trainer whose standing link is printed to the console, since
 a join link is otherwise only obtainable by signing in as a trainer and reading it — which is
 exactly the loop the quickstart needs to break to test registration from a cold start.
+
+---
+
+# Extension: Parent/Child Family Accounts & the Approval Workflow
+
+**Date**: 2026-08-27 | **Inputs**: [spec.md](./spec.md) FR-106 – FR-159,
+[research.md](./research.md) R-34 – R-51
+
+**This extension is not additive, and that is the headline.** Every previous slice could say "no
+existing column changes type or nullability". This one cannot. `player_details.user_id` is a primary
+key that also happens to be a foreign key to `users` — the schema's way of asserting *one player per
+account* — and FR-106 removes exactly that assertion. So `player_details` is replaced by
+`player_profiles` (R-34), `trainer_player_associations` is re-pointed at it (R-35), and the active
+context moves to a table of its own (R-36). §35 lists every piece of existing code that assumes the
+old shape, because that list is the real size of this slice.
+
+## 25. New enumerations
+
+All three are Python `enum.StrEnum` persisted as constrained text, joining `UserRole`,
+`AccountStatus`, `ShareLinkKind`, `AssociationStatus`, and `Gender` in `models/enums.py`.
+
+### `PlayerProfileKind`
+
+| Value | Meaning |
+|---|---|
+| `self` | The account holder is this player. At most one per account (FR-106). Name and photo are read from `user_profiles` (R-37). Age must be 18 or above (FR-108). |
+| `child` | A player the account holder is responsible for. Any number per account. Carries its own name and photo, because a child may have no `users` row at all. Age must be 1–18. |
+
+### `ApprovalRequestKind`
+
+| Value | Subject columns | Executed by this feature |
+|---|---|---|
+| `join_trainer` | `trainer_user_id`, optionally `share_link_id` | **yes** — the one kind whose subject exists today (R-46) |
+| `usd_payment` | `amount_minor`, `currency` | no — rules and columns only; Epic-05 registers the executor |
+| `token_spend` | `amount_minor`, `currency` | no — same |
+
+FR-142 requires all three to exist in the record now. Only `join_trainer` rows are written by this
+feature, and approving either other kind raises a domain error rather than recording an approval whose
+action never happened (R-42, R-46).
+
+### `ApprovalRequestStatus`
+
+| Value | Live | Terminal | Set by |
+|---|---|:---:|---|
+| `pending_parent_approval` | yes | | Request creation; a child's reply to an information request |
+| `info_requested` | yes | | The parent asking for more information |
+| `approved` | | yes | The parent, with the action carried out in the same transaction |
+| `denied` | | yes | The parent |
+| `expired` | | yes | The maintenance sweep, 48 hours after the request was raised |
+| `withdrawn` | | yes | The child who raised it |
+
+Permitted transitions, enforced by the service and asserted by unit tests (FR-143):
+
+```
+pending_parent_approval ──┬─▶ info_requested
+                          ├─▶ approved
+                          ├─▶ denied
+                          ├─▶ expired
+                          └─▶ withdrawn
+
+info_requested ───────────┬─▶ pending_parent_approval   (the child replies)
+                          ├─▶ denied
+                          ├─▶ expired
+                          └─▶ withdrawn
+
+approved / denied / expired / withdrawn ──▶ (nothing — terminal)
+```
+
+`info_requested` cannot go directly to `approved`: the parent asked a question, so the answer returns
+the request to pending and they decide from there. Anything else is a domain error.
+
+## 26. `player_profiles`
+
+One player who trains (FR-106, FR-107). Replaces `player_details`.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | text(36) | PK | UUIDv4. The identifier associations, contexts, and approval requests reference. |
+| `account_user_id` | text(36) | FK → `users.id`, cascade delete, not null, indexed | The account that owns this profile. Always a `player_parent` account (FR-109). |
+| `kind` | text | not null, check in `PlayerProfileKind` | |
+| `first_name` | text(100) | **nullable** | `NULL` exactly when `kind = 'self'`; read from `user_profiles` then (R-37). |
+| `last_name` | text(100) | **nullable** | Same rule. |
+| `photo_key` | text(128) | nullable | Opaque storage key behind the existing photo port. For a `self` profile this stays `NULL` and `user_profiles.photo_key` is used. |
+| `date_of_birth` | date | nullable | Age is derived, never stored (R-31, carried over). Nullable **only** so revision 9 can migrate rows that never had one; required by the schema on every new write. |
+| `gender` | text | nullable, check in `Gender` | |
+| `school` | text(200) | nullable | Self-editable (FR-107). |
+| `jersey_number` | text(10) | nullable | Text, not integer — unchanged reasoning from §4.3. |
+| `skill_level` | text(50) | nullable | Never writable by the family (FR-107, FR-007). |
+| `tokens_without_approval` | boolean | not null, default `false` | The one per-child permission (FR-146, R-44). The default is in the schema because it is a safety property. |
+| `sign_in_user_id` | text(36) | FK → `users.id`, nullable, **unique** | The child's own account when the parent granted one (FR-129). `NULL` means no separate sign-in. |
+| `removed_at` | timestamptz | nullable | Soft removal (FR-111). `NULL` means the profile is live. |
+| `created_at` | timestamptz | not null | |
+| `updated_at` | timestamptz | not null | |
+
+**Check constraints:**
+
+| Name | Rule | Why |
+|---|---|---|
+| `ck_player_profiles_kind` | `kind` in `PlayerProfileKind` | Closed set. |
+| `ck_player_profiles_gender` | `gender` null or in `Gender` | Matches the existing `ck_player_details_gender`. |
+| `ck_player_profiles_self_names` | `(kind = 'self' AND first_name IS NULL AND last_name IS NULL) OR (kind = 'child' AND first_name IS NOT NULL AND last_name IS NOT NULL)` | Makes R-37's two cases exhaustive and mutually exclusive, so no row is ambiguous about which name is authoritative. |
+| `ck_player_profiles_signin_is_child` | `sign_in_user_id IS NULL OR kind = 'child'` | A `self` profile's sign-in *is* the account; a second credential for it would be a duplicate account for one person. |
+
+**Indexes:**
+
+- `uq_player_profiles_one_self` — **partial** unique index on `(account_user_id)`
+  `WHERE kind = 'self'`. This is what makes FR-106's "at most one of the account holder's own kind"
+  true by construction rather than checked, and Story 9 scenario 8 a 409 rather than a race.
+- Unique on `sign_in_user_id` — one credential belongs to one child.
+- `(account_user_id, removed_at)` — the family list, which reads live profiles for one account.
+- `(sign_in_user_id)` covered by the unique index — the lookup R-38 folds into current-user
+  resolution.
+
+**Why `removed_at` rather than a status enum**: a profile has exactly two states, and FR-111 asks only
+that removal preserve history. A nullable timestamp says when it happened as well as whether, which a
+boolean would not, and it avoids a third enum that would then need its own transition table.
+
+### 26.1 The one duplication this design accepts, and how it is contained
+
+A child granted a sign-in gets a `users` row, and §3 requires **every** account to hold a
+`user_profiles` row with non-null `first_name` and `last_name`. So a child with a sign-in has their
+name in two places: `player_profiles` (where R-37 puts it, and where it must be, because a child
+*without* a sign-in has no other home) and `user_profiles` (where the account table requires it).
+
+This is stated rather than discovered because it is the one place this slice tolerates a copy, and an
+implementer who meets it mid-task will otherwise invent a third answer.
+
+- **The profile is authoritative.** `player_profiles.first_name`/`last_name` is the source of truth for
+  a child's name, in every read, for every viewer.
+- **There is exactly one writer.** The service that edits a child profile writes both rows in one
+  transaction; granting a sign-in seeds `user_profiles` from the profile. No other code path writes a
+  child account's `user_profiles` names.
+- **Nothing reads the copy.** Rosters, switchers, approval queues, and the child's own views all read
+  the profile. The `user_profiles` row exists to satisfy the account invariant, not to be displayed.
+
+**Alternatives weighed and rejected**: relaxing `user_profiles.first_name` to nullable — it would
+weaken an invariant every one of the four roles currently relies on, to accommodate one case. Moving a
+child-with-sign-in's name onto `user_profiles` and leaving the profile's columns null — then granting
+a sign-in *moves* the name and revoking it loses the name, which is absurd. Deriving `user_profiles`
+names with a database trigger — a third raw-SQL exception for a copy one service method already
+maintains.
+
+**Photos take the simpler path**: `player_profiles.photo_key` is authoritative and
+`user_profiles.photo_key` stays `NULL` for a child account, because §3 permits it to be null. Only
+the names are duplicated, because only the names are `NOT NULL`.
+
+## 27. `active_training_contexts`
+
+Which player profile and which trainer a signed-in account is currently looking at (FR-117, FR-120,
+R-36). Replaces `player_details.active_trainer_user_id`.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `user_id` | text(36) | PK, FK → `users.id`, cascade delete | One context per signed-in account — a parent and each child with a sign-in hold their own. |
+| `player_profile_id` | text(36) | FK → `player_profiles.id`, nullable | Nullable because holding no live association is a valid state. |
+| `trainer_user_id` | text(36) | FK → `users.id`, nullable | Same. |
+| `updated_at` | timestamptz | not null | |
+
+The stored pair is **never trusted as read**, exactly as `active_trainer_user_id` was not (R-24). One
+service function validates that the profile is still live and still reachable by this caller, that the
+association is still `active`, and that the trainer's account is still `active`; on any failure it
+selects another available pair, writes the correction back, and returns that. Both columns are
+nullable together — a row with one set and the other null is not a state the service ever writes, and
+the resolver treats it as no context at all.
+
+**Why a row per account rather than a nullable pair on `users`**: three of the four roles can never
+hold a training context, and `users` is the most-read table in the system (R-36).
+
+## 28. `approval_requests`
+
+The Pending Parent Approval workflow (FR-141 – FR-159). One table, typed subject columns, no JSON
+payload (R-39).
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | text(36) | PK | |
+| `player_profile_id` | text(36) | FK → `player_profiles.id`, not null, indexed | The child the request concerns. |
+| `parent_user_id` | text(36) | FK → `users.id`, not null, indexed | The account that must resolve it. Recorded here rather than reached through the profile, so the responsible adult at the time of the request is fixed. |
+| `kind` | text | not null, check in `ApprovalRequestKind` | |
+| `status` | text | not null, check in `ApprovalRequestStatus`, indexed | |
+| `trainer_user_id` | text(36) | FK → `users.id`, nullable | Subject of a `join_trainer` request. |
+| `share_link_id` | text(36) | FK → `share_links.id`, nullable | Which link the child followed, when there was one. |
+| `amount_minor` | integer | nullable | Minor currency units — an integer, never a float (R-39). The amount **as shown to the parent** (FR-152). |
+| `currency` | text(3) | nullable | ISO 4217. |
+| `requested_at` | timestamptz | not null | |
+| `expires_at` | timestamptz | not null, indexed | `requested_at + 48 hours`, written once and never recomputed (R-43, FR-155). |
+| `parent_note` | text(1000) | nullable | Attached to an approval, a denial, or an information request (FR-150). |
+| `child_note` | text(1000) | nullable | The child's reply to an information request. |
+| `resolved_at` | timestamptz | nullable | |
+| `resolved_by_user_id` | text(36) | FK → `users.id`, nullable | The parent, the child (for a withdrawal), or `NULL` for an expiry, which no one performed. |
+
+**Check constraints:**
+
+| Name | Rule | Why |
+|---|---|---|
+| `ck_approval_requests_kind` / `_status` | Closed sets | |
+| `ck_approval_requests_subject` | `(kind = 'join_trainer' AND trainer_user_id IS NOT NULL AND amount_minor IS NULL AND currency IS NULL) OR (kind IN ('usd_payment','token_spend') AND amount_minor IS NOT NULL AND currency IS NOT NULL AND trainer_user_id IS NULL)` | The subject matches the kind, at the schema level. This is what a JSON payload could not give (R-39). |
+| `ck_approval_requests_resolution` | Live statuses require `resolved_at IS NULL`; terminal statuses require `resolved_at IS NOT NULL` | A resolved request always says when. |
+| `ck_approval_requests_expiry_actor` | `status <> 'expired' OR resolved_by_user_id IS NULL` | Expiry is the one resolution with no actor, and recording a spurious one would misattribute a decision nobody took. |
+
+**Indexes:**
+
+- `uq_approval_requests_live` — **partial** unique index on
+  `(player_profile_id, kind, trainer_user_id)` `WHERE status IN ('pending_parent_approval',
+  'info_requested')`. FR-139's "no second request while one is pending" by construction (R-40). It is
+  partial so that a denied request does not bar the child from ever asking again.
+- `(parent_user_id, status)` — the parent's pending list (FR-149).
+- `(player_profile_id, status)` — the child's own view of what they asked for (FR-153).
+- `(status, expires_at)` — the sweep's only query (R-43); it must be an index scan, not a table scan.
+
+**One honest limitation of the partial index**: SQLite treats `NULL`s as distinct in a unique index,
+and the two financial kinds carry `trainer_user_id IS NULL`. So the index bites for `join_trainer` —
+the only kind this feature creates — and does not constrain duplicate pending payment requests. That
+is correct today, because a payment's real subject is an event that does not exist until Epic-02;
+when it does, the subject column joins this index and the guarantee extends with it. Recorded rather
+than discovered.
+
+## 29. Changes to existing tables
+
+### 29.1 `trainer_player_associations` — the association's subject moves
+
+| Change | Detail |
+|---|---|
+| **Added** | `player_profile_id` text(36), FK → `player_profiles.id`, not null (after revision 10), indexed |
+| **Dropped** | `player_user_id` — the account-level reference (R-35) |
+| **Unique constraint** | `uq_trainer_player` moves from `(trainer_user_id, player_user_id)` to `(trainer_user_id, player_profile_id)` |
+| **Index** | `ix_tpa_player_status` moves from `(player_user_id, status)` to `(player_profile_id, status)` |
+| **Unchanged** | `id`, `trainer_user_id`, `share_link_id`, `status`, `joined_at`, `updated_at`, and `ix_tpa_trainer_status` |
+
+The unique constraint is load-bearing and must stay load-bearing: it is what makes FR-082's
+"already connected" a caught integrity error rather than a checked precondition, and the same is now
+true at profile granularity for FR-126's re-add case (Story 10 scenario 4). `AssociationStatus`
+gains its first writer in this slice — §15 noted that nothing set `inactive` and that US-01.04 would;
+FR-126 is that requirement.
+
+### 29.2 `player_details` — dropped
+
+Every column migrates to `player_profiles`: `school`, `jersey_number`, `skill_level`,
+`date_of_birth`, `gender` directly; `player_name` into `first_name`/`last_name` under R-37's rule;
+`is_self` into `kind`; `active_trainer_user_id` into `active_training_contexts`. The table is then
+dropped rather than left as an empty shell (R-34).
+
+### 29.3 `parent_contacts` — unchanged, and now load-bearing
+
+Not one column changes. What changes is its standing: FR-113 makes it the family's single contact
+record, held against the account and serving every child on it, which is what §4.4 already described
+as "one family account that may both train and parent". A child profile carries no contact detail of
+its own, deliberately — that is the epic's "shares parent's contact info".
+
+### 29.4 `users` — unchanged
+
+No column is added. A child's account is an ordinary `player_parent` row (R-38), and "this is a child
+account" is derived from the existence of a `player_profiles` row whose `sign_in_user_id` names it.
+No `account_kind` column exists, so the two facts cannot diverge.
+
+## 30. Erasure, extended again
+
+Additions to §10 and §20. The transaction gains these lines.
+
+| Target | Before | After |
+|---|---|---|
+| `player_profiles.first_name` / `last_name` (child) | `Alex Lee` | `Deleted` / `User` — not `NULL`, because `ck_player_profiles_self_names` requires a child to have a name, and the roster must still read "Deleted User" (FR-091) |
+| `player_profiles.first_name` / `last_name` (self) | already `NULL` | **unchanged** — the account's own profile is anonymized by §10 |
+| `player_profiles.photo_key` | storage key | `NULL`, and both stored image files removed |
+| `player_profiles.date_of_birth` | a date | `NULL` — identifying, as §20 already established |
+| `player_profiles.school`, `jersey_number` | free text | `NULL` |
+| `player_profiles.gender`, `skill_level` | a value | **unchanged** — classifications later epics group by, not identifiers (§20's reasoning) |
+| `player_profiles.tokens_without_approval` | either | `false` — no permission survives the person |
+| `player_profiles.sign_in_user_id` | an account id | `NULL`, **and that child account is itself erased** — see below |
+| `player_profiles.removed_at` | either | **unchanged** |
+| `active_training_contexts` rows for the account and each child sign-in | possibly set | deleted — an erased account has no context to be in |
+| `approval_requests` in a live status | pending | `expired`, `resolved_at` set, `resolved_by_user_id` `NULL` — no one can approve for an erased family (FR-157) |
+| `approval_requests.parent_note`, `child_note` | free text | `NULL` — free text written by a person may name them, exactly as §10 treats a coach's biography |
+| `approval_requests` otherwise | any | **unchanged** — kind, amount, timestamps, and outcome survive, so FR-047's totals do |
+| `trainer_player_associations.*` | any | **unchanged** (FR-091) — every roster keeps its row |
+
+**Erasing a parent cascades to their children's sign-ins.** A child account is personal data about a
+child, so erasing the family must erase it too: each `sign_in_user_id` account goes through the same
+anonymization as the parent, in the same transaction. This is stated here because it is the one place
+erasure reaches an account other than the one named, and because getting it wrong would leave a
+signed-in child able to act on behalf of an erased family. Participant counts are unaffected — the
+child profile survives as "Deleted User" on every roster, which is the row the counts read.
+
+**One judgement recorded, in the same spirit as §10's two**: a child's `date_of_birth` is cleared but
+`gender` is not, matching §20's treatment of the account holder. For a family of one child this makes
+the surviving classification weakly identifying in combination with the trainer's roster. The
+alternative — clearing it — costs Epic-02 its age-and-gender grouping for historical events, which
+FR-047 protects. The same caveat and the same one-line fallback as §10 apply.
+
+## 31. Relationships, extended
+
+```
+users (parent, player_parent) ──1───* player_profiles
+     │                                     │ 0..1  sign_in_user_id
+     │ 1                                   ▼
+     └──1 parent_contacts            users (child, player_parent)
+                                            │ 1
+                                            ▼
+                                     active_training_contexts  (one per signed-in account)
+                                            │ 0..1        │ 0..1
+                                            ▼             ▼
+                                     player_profiles   users (trainer)
+
+player_profiles ──1───* trainer_player_associations *───1── users (trainer)
+                │                       │ 0..1
+                │                       ▼
+                │                  share_links
+                │
+                └──1───* approval_requests ───1── users (parent, resolver)
+                                  │ 0..1
+                                  ▼
+                            users (trainer)  +  share_links
+```
+
+Two shapes worth reading twice. First, `player_profiles` points at `users` **twice** — once for the
+owning account and once, optionally, for the child's own credential — and those are different
+accounts. Second, `active_training_contexts` is keyed by the *viewer*, not the profile, which is why a
+parent and their signed-in child can look at the same profile through different contexts without
+either overwriting the other (R-36).
+
+## 32. Validation rules, extended
+
+| Field | Rule | Source |
+|---|---|---|
+| `kind` | One of two enum values; at most one `self` per account, enforced by a partial unique index | FR-106 |
+| `first_name`, `last_name` (child) | 1–100 characters after trimming, required | FR-107, FR-112 |
+| `first_name`, `last_name` (self) | Must be absent; supplying them is a 422, not a silent no-op | R-37 |
+| `date_of_birth` | A real past date; derived age ≥18 when `kind = 'self'`, 1–18 when `kind = 'child'`. Required on every new write | FR-108 |
+| `gender` | One of the four enum values, required on creation | FR-107 |
+| Duplicate child | Same account, same `date_of_birth`, case-insensitive match on trimmed first **and** last name → 409 unless `acknowledge_possible_duplicate` is true | FR-110, R-45 |
+| Child sign-in email | Same rule as account creation — unique across all statuses, not matching `deleted_*@example.com`; refused if it is the parent's own address | FR-129, FR-004 |
+| Profile ownership | Every `/me/players/{profile_id}` route refuses a profile whose `account_user_id` is not the caller — 404, not 403, so a profile on another account is not confirmed to exist | FR-112 |
+| Child's reachable profile | A signed-in child may name only the profile their `sign_in_user_id` is attached to; a sibling's id is a 404 | FR-132, R-48 |
+| Association removal | Addressed by `association_id`, which must belong to a profile the caller owns | FR-126, R-48 |
+| Add trainer by selection | The named trainer must hold an `active` association with **some** profile on the caller's account; otherwise 404 | FR-125 |
+| `PUT /me/context` body | The pair must be a live profile the caller may reach with an `active` association to that trainer; otherwise 404 | FR-117, FR-119 |
+| `tokens_without_approval` | Boolean, writable only by the owning parent — a child's attempt is refused | FR-132, FR-147 |
+| Approval resolution | Only `parent_user_id` (or a Super Admin); only from a live status; only before `expires_at`; only while the parent is Active | FR-156, FR-157 |
+| Withdrawal | Only by the child the request concerns, only from a live status | FR-154 |
+| `parent_note`, `child_note` | 1–1000 characters after trimming when present; `null` when absent, never `''` | Constitution VI |
+| `amount_minor` | Positive integer; `currency` a three-letter code — both required for a financial kind and forbidden otherwise | R-39 |
+| Approving a financial kind | Refused with a domain error while no executor is registered | FR-142, R-46 |
+| Any new nullable text field | Empty string rejected (`min_length=1`); absence is `null`; an explicit `null` clears, an omitted key does not | Constitution VI, FR-059 |
+
+## 33. Alembic revisions 8–10
+
+Three revisions, splitting structure from data from constraints (R-35). HEAD moves `0007` → `0010`.
+
+| # | Revision | Contents |
+|---|---|---|
+| 8 | `create_player_profiles_and_approvals` | Creates `player_profiles` (with its four check constraints and the partial one-self index), `active_training_contexts`, and `approval_requests` (with its four check constraints and the partial live index). Adds `trainer_player_associations.player_profile_id` as **nullable**, with its foreign key and index. Nothing is dropped and nothing is required, so the application keeps working unchanged on this revision. |
+| 9 | `migrate_players_to_profiles` | **Data migration**, SQLAlchemy Core against `op.get_bind()`. One `player_profiles` row per `player_details` row: `kind` from `is_self`, names split from `player_name` for a child and left `NULL` for a self player, every other column copied. Then `player_profile_id` backfilled on every association by joining `player_user_id` to the new row's `account_user_id`. Then one `active_training_contexts` row per player whose `active_trainer_user_id` was set, resolving the profile as that account's single profile. Idempotent: re-running selects nothing. |
+| 10 | `finalize_profile_associations` | Under `batch_alter_table`: makes `player_profile_id` non-nullable, drops `uq_trainer_player` and recreates it on `(trainer_user_id, player_profile_id)`, drops `ix_tpa_player_status` and recreates it on `(player_profile_id, status)`, drops `player_user_id`. Then drops `player_details`. |
+
+Revision 9 uses Core `select`/`insert`/`update` exactly as revision 7's backfill did, so **the two
+documented raw-SQL exceptions in `plan.md` §Complexity Tracking stay at two**. The CI grep that
+forbids `.execute("` outside `db/engine.py` continues to pass.
+
+**Splitting a `player_name` into two columns**: revision 9 splits on the last space — everything
+before it is the first name, everything after is the last. Where there is no space, the whole value
+becomes the first name and the last name becomes `'—'`, because
+`ck_player_profiles_self_names` requires a child to have both and refusing the migration over a
+one-word name would block the upgrade. The heuristic is recorded here rather than left in the
+migration for someone to discover, and it applies only to rows created before this slice; every new
+child supplies both names as separate fields.
+
+**Downgrade behaviour, and its deliberate limit**: revisions 8 and 10 reverse cleanly. Revision 9's
+`downgrade()` restores `player_details` rows from `player_profiles` **only when every account holds
+exactly one profile**, and otherwise **raises**, because a parent's three children cannot be
+represented in a table keyed by account. A migration that silently discarded two of them would be
+worse than one that refuses to run, so the refusal is the designed behaviour and is asserted by a
+test.
+
+**Verification point**: revision 9 is the one to check before proceeding. `test_migration_backfill.py`
+gains assertions that the association count is unchanged across 8→9→10, that every association has a
+`player_profile_id`, and that every account with a former context has exactly one
+`active_training_contexts` row.
+
+## 34. Seed data, extended
+
+`bootstrap-superadmin` and `seed-demo-trainer` are unchanged. `seed-demo-trainer` gains one line of
+output: alongside the trainer's join link it prints nothing new, but a third command,
+`seed-demo-family`, creates a parent with a `self` profile, two children — one with a sign-in and one
+without — and one pending `join_trainer` request, printing the parent's and the child's credentials.
+The quickstart's US9–US12 walks need a family that already has a pending request, and building one by
+hand means signing in as a child, following a link, and signing back in as the parent before any
+assertion can be made.
+
+`prune` gains approval expiry (R-43), so its help text names both effects rather than only pruning.
+
+## 35. What the migration touches — the blast radius
+
+Recorded because §29's four table changes understate the work. Everything below assumes one player per
+account today.
+
+**Backend, must change:**
+
+| Location | Assumption to remove |
+|---|---|
+| `repositories/user_repository.py` — `get_role_detail` | Returns `tuple[PlayerDetail, ParentContact \| None]` for a `player_parent`. The tuple's first element becomes a *list* of profiles, or the profile leaves this method entirely. |
+| `repositories/user_repository.py` — `insert_join_registration` | Writes one `PlayerDetail` keyed by the new account; must write a `player_profiles` row instead. |
+| `repositories/association_repository.py` — `list_active_for_player`, `list_for_trainer`, `count_for_trainer`, `get`, `insert`, `TrainerRosterRow` | All five join on the account id; all must join on the profile id, and the roster row gains the profile identity plus the responsible parent's contact. |
+| `services/trainer_context_service.py` — all three methods | Reads and writes `player_details.active_trainer_user_id`; becomes the pair resolver over `active_training_contexts` (R-36). Renamed to match, since it no longer resolves only a trainer. |
+| `services/join_service.py` — `register`, `accept`, `_viewer_state` | Writes `active_trainer_user_id` in two places; `accept` gains the family-member selection of FR-122 and Story 13, and `_viewer_state` gains the blocked-child branch of FR-137. |
+| `services/erasure_service.py` — `_anonymize_role_detail` | Clears three `player_details` columns; becomes §30's larger transformation, including the cascade to child sign-ins. |
+| `services/profile_service.py` — `_apply_role_detail_updates`, `editable_fields_for` | The player fields it edits move off the account's role detail. |
+| `schemas/role_detail.py` — `build_role_detail_out` | Builds `PlayerParentDetail` from the tuple; that schema loses the player fields (R-34, R-49). |
+| `api/v1/auth_router.py` — `_to_current_user` | Fills `active_trainer_id` and `trainer_count`; becomes the profile-aware pair plus a count of pairs. |
+| `core/deps.py` — `get_trainer_context`, `TrainerContextDep` | Becomes `get_training_context` returning a validated pair (R-48). |
+
+**Frontend, must change in lockstep:**
+
+`shared/api/types.ts` (`TrainerContextEntry`, `TrainerPlayerSummary`, `CurrentUser.active_trainer_id`
+and `trainer_count`, `JoinResult`, `PlayerParentDetail`); `entities/trainer-context/api/query-keys.ts`
+(`ctxKeys` gains the profile dimension, R-47); `entities/trainer-context/api/use-trainers.ts` and
+`use-switch-context.ts`; `widgets/trainer-context-switcher` (keyed on trainer today, must group by
+profile per FR-118 and FR-119).
+
+**Tests that encode the old shape:**
+
+`tests/helpers.py` — `create_player_with_detail` creates one `PlayerDetail` per account and is used
+throughout; it becomes a profile factory, and a family factory joins it. Existing suites to update:
+`test_trainer_context.py`, `test_context_repair.py`, `test_trainer_roster.py`,
+`test_trainer_isolation.py`, the `test_join_*.py` set, `test_erasure_associations.py`,
+`test_migration_backfill.py`, `test_permission_matrix.py`, `contract/test_openapi_contract.py`, and on
+the frontend `trainer-context-switcher.test.tsx`, `ctx-namespace.test.ts`, `join.test.tsx`.
+
+This list is the argument for carrying all three migrations and the whole repository rework in one
+foundational phase rather than spreading them across the user stories — see `plan.md`
+§Implementation Sequence for the extension.

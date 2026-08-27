@@ -1,11 +1,13 @@
-# Feature Specification: User Roles, Super Admin Management, ShareLink Onboarding & Portal Branding
+# Feature Specification: User Roles, Super Admin Management, ShareLink Onboarding, Portal Branding & Family Accounts
 
 **Feature Branch**: `001-user-roles-admin`
 
 **Created**: 2026-08-19
 
 **Status**: Draft — extended 2026-08-26 with player ShareLink onboarding (US-01.02),
-multi-trainer association, and trainer portal branding (US-01.14)
+multi-trainer association, and trainer portal branding (US-01.14); extended 2026-08-27 with
+parent/child family accounts, constrained child sign-in, and the parent approval workflow
+(US-01.03, US-01.04, US-01.05, US-01.06)
 
 **Input**: User description: "Read file Task/Epics/Epic-01_User_Management_Authentication_SPEC.md. Create specification (spec.md) only for initial Database structure (4 roles), authorizations and Super Admin functionality (US-01.01, US-01.11, US-01.12, US-01.13). Ignore other user stories for now."
 
@@ -15,10 +17,15 @@ portal customization (US-01.14) from the Task/Epics/Epic-01_User_Management_Auth
 file. Note that a single player can be associated with multiple coaches (Multi-Trainer
 Association)."
 
+**Input (2026-08-27 extension)**: User description: "Update spec.md. Add the complex Parent/Child
+business logic from Task/Epics/Epic-01_User_Management_Authentication_SPEC.md (user stories
+US-01.03, US-01.04, US-01.05, US-01.06). Pay special attention to the parent purchase approval
+workflow (Pending Parent Approval)."
+
 **Source Epic**: Epic-01 — User Management & Authentication. This specification covers the
 foundational account structure, sign-in and permission enforcement, plus epic stories US-01.01,
-US-01.11, US-01.12, US-01.13, US-01.02, and US-01.14. The remaining Epic-01 stories are
-explicitly out of scope (see Out of Scope).
+US-01.11, US-01.12, US-01.13, US-01.02, US-01.14, US-01.03, US-01.04, US-01.05, and US-01.06.
+The remaining Epic-01 stories are explicitly out of scope (see Out of Scope).
 
 **Scope note on the 2026-08-26 extension**: Stories 1 to 5 and requirements FR-001 to FR-064 are
 unchanged and already implemented. Stories 6 to 8 and requirements FR-065 to FR-104 are the newly
@@ -27,6 +34,31 @@ multi-trainer association and separated per-trainer views that story requires, a
 portal branding (US-01.14). Branding is owned by a Trainer and *seen* by that trainer's coaches
 and players — the epic assigns the customization itself to the Trainer role, so that is what is
 specified here; coaches consume the branding but cannot change it.
+
+**Scope note on the 2026-08-27 extension**: Stories 1 to 8 and requirements FR-001 to FR-105 are
+unchanged. Stories 9 to 13 and requirements FR-106 to FR-159 are the newly specified slice: one
+account holding a whole family (US-01.03), the parent's control over which trainers each child
+trains with (US-01.04), a child's own constrained sign-in and the invitation link that is blocked
+for them (US-01.06), and the parent approval workflow the epic calls "Pending Parent Approval"
+(US-01.05).
+
+This extension **changes a structure the earlier slices established**, and that change is
+deliberate rather than incidental. Until now one Player/Parent account meant exactly one player,
+and a trainer association joined an *account* to a trainer. From here an account holds one or more
+**player profiles** — at most one for the account holder themselves, plus one per child — and an
+association joins a *player profile* to a trainer. FR-114 states the refinement and names every
+earlier requirement whose subject moves from the account to the profile; nothing that was
+previously true of a single-player account stops being true, because such an account becomes an
+account holding exactly one profile.
+
+The purchase approval workflow is specified once, as a **generic child-initiated request** that a
+parent resolves, because the epic applies the identical mechanism to three different subjects: a
+USD payment, a token spend, and — through US-01.06's blocked invitation link — a child asking to
+join a trainer. Only the last of those three has a subject that exists in the platform today;
+events, payments, and tokens arrive with Epic-02 and Epic-05. So the mechanism ships complete and
+demonstrable now, driven by join requests, and the payment and token kinds are specified as rules
+and recorded data whose *execution* defers to Epic-05 (FR-142, FR-158). This is what keeps the
+headline workflow testable in this slice instead of being a schema waiting for another epic.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -376,6 +408,287 @@ while a player in a different trainer's context sees the platform default.
 
 ---
 
+### User Story 9 - A Parent Puts Their Whole Family on One Account (Priority: P1)
+
+A parent already using the platform opens their family page and adds a child: the child's name, age
+and gender, optionally a school and a photo. Because the account holder may train themselves as
+well, each player on the account is marked either as the account holder or as a child. As the child
+is created the platform asks, in the plainest way the situation allows, whether the child will train
+with the trainers the parent already trains with — a single yes-or-no question when there is only
+one trainer, a checklist when there are several, and nothing at all when there are none. From then
+on the parent's navigation carries every player on the account, and each child is a world of their
+own: their own trainers, their own calendar, their own attendance.
+
+**Why this priority**: Every remaining story in this extension needs a child to exist before it has
+a subject. It is also the story that changes the shape of the data — one account, many players —
+so shipping it first means the association and approval work is built on the final structure
+instead of migrating onto it later.
+
+**Independent Test**: Sign in as a parent associated with one trainer, add two children answering
+yes for one and no for the other, and confirm both profiles exist under the one account, that only
+the first is on the trainer's roster, and that the parent's navigation now offers a choice between
+themselves and each child. This delivers family accounts on its own with no other new story
+shipped.
+
+**Acceptance Scenarios**:
+
+1. **Given** a signed-in Player/Parent, **When** they add a child with a name, age and gender,
+   **Then** a player profile marked as a child is created under their account and appears in their
+   family list.
+2. **Given** a parent associated with exactly one trainer, **When** they add a child, **Then** they
+   are asked a single question naming that trainer, and answering yes associates the child with it
+   while answering no leaves the child with no trainer.
+3. **Given** a parent associated with several trainers, **When** they add a child, **Then** they are
+   offered the list of those trainers and only the ones they select are associated with the child.
+4. **Given** a parent associated with no trainer, **When** they add a child, **Then** no trainer
+   question is asked and the child profile is created with no association.
+5. **Given** an age outside 1 to 18 for a child, or a missing name or gender, **When** the form is
+   submitted, **Then** the message appears beside the offending field and no profile is created.
+6. **Given** the account already holds a child of a very similar name and the same age, **When**
+   another is submitted, **Then** the parent is warned that it may be a duplicate and may either
+   confirm or go back, and confirming creates the profile.
+7. **Given** a parent who trains themselves, **When** they look at their family list, **Then** their
+   own player profile appears alongside their children's, distinguished as the account holder.
+8. **Given** a parent, **When** they attempt to add a player marked as the account holder while one
+   already exists, **Then** the attempt is refused, because an account has at most one of those.
+9. **Given** a parent, **When** they attempt to create a child profile whose age is 18 or above,
+   **Then** the attempt is refused with an explanation that adults hold their own accounts.
+10. **Given** a signed-in Trainer, Coach, or Super Admin, **When** they attempt to add a child
+    profile to a Player/Parent account, **Then** the attempt is refused — only the account holder
+    manages their own family.
+11. **Given** a parent, **When** they open or edit a player profile belonging to a different
+    account, **Then** the attempt is refused unless they are a Super Admin.
+
+---
+
+### User Story 10 - A Parent Decides Which Trainers Each Child Trains With (Priority: P1)
+
+A parent opens their family page and sees, for every player on the account, which trainers that
+player trains with and since when. They can add a trainer to a child either by following that
+trainer's invitation link or by picking from the trainers they themselves already train with — the
+second being the common case, since families usually add a sibling to the program they already
+know. They can also take a child out of a program: the platform states plainly that upcoming
+reservations will be cancelled, and once confirmed the child is off that trainer's roster while
+everything that already happened stays on the record.
+
+**Why this priority**: A family's membership changes constantly — a sibling joins, a season ends,
+a child switches sports. Without this the only way to change a child's trainers would be to create
+the profile again, and the trainer's roster would drift out of step with reality. It sits with
+Story 9 at P1 because a child profile that cannot be re-pointed is barely usable.
+
+**Independent Test**: With a parent who trains with two trainers and has one child on one of them,
+add the second trainer to the child by picking from the parent's own trainers, confirm the child
+appears on both rosters, then remove one and confirm the child leaves that roster while the past
+record survives and the other association is untouched.
+
+**Acceptance Scenarios**:
+
+1. **Given** a signed-in parent on their family page, **When** they look at a child, **Then** they
+   see that child's name, age and every trainer the child is associated with together with the date
+   each association began.
+2. **Given** a parent viewing a child, **When** they choose to add a trainer and pick one of the
+   trainers they themselves already train with, **Then** the child is associated with that trainer
+   and appears on that trainer's roster.
+3. **Given** a parent viewing a child, **When** they choose to add a trainer by supplying an
+   invitation link, **Then** a valid link associates that child with its owning trainer, and an
+   invalid one is refused under the same rules as any other use of that link.
+4. **Given** a child already associated with a trainer, **When** the parent adds the same trainer
+   again, **Then** they are told the child is already connected and no second association is
+   recorded.
+5. **Given** a parent viewing a child's association, **When** they choose to remove it, **Then**
+   they must confirm through a prompt naming the child and the trainer and stating that upcoming
+   reservations with that trainer will be cancelled.
+6. **Given** the removal is confirmed, **When** it completes, **Then** the association becomes
+   inactive, the trainer's roster no longer lists the child, and the record of what the child
+   already did with that trainer remains intact.
+7. **Given** a child whose association with a trainer was removed, **When** the parent later adds
+   that trainer again, **Then** the same child profile is reused, no duplicate profile is created,
+   and the earlier history remains attached.
+8. **Given** a parent removing a child's last remaining association, **When** it completes,
+   **Then** the child profile still exists with no trainer and is shown as belonging to no program.
+9. **Given** a child with their own sign-in, **When** they attempt to add or remove any trainer for
+   themselves, **Then** the attempt is refused whether it is made through the interface or directly.
+10. **Given** a parent, **When** they attempt to change the associations of a player profile on
+    another account, **Then** the attempt is refused.
+
+---
+
+### User Story 11 - A Child Signs In and Finds Most Doors Locked (Priority: P2)
+
+A parent can give a child their own way in, by supplying an email address for that child; the child
+then chooses their own password and signs in to a portal of their own. What they find is deliberately
+narrow. They can look at their program, see what they are booked into, see their own progress, see
+how many tokens they have, change their photo, and move between their own trainers if they have more
+than one. What they cannot do is anything that costs money, changes who they train with, or reaches
+into the rest of the family: their parent's training and their siblings' training are invisible to
+them. When a child follows a new trainer's invitation link the platform stops them, tells them to
+ask their parent, and emails the parent the link — so the child's enthusiasm reaches the parent
+instead of quietly enlarging the family's commitments.
+
+**Why this priority**: Children being able to look at their own training without being able to spend
+or commit is what makes the family model safe enough to hand to a child at all. It follows Stories 9
+and 10 because a child needs a profile and trainers before there is anything for them to sign in to.
+
+**Independent Test**: Give a child their own sign-in, sign in as that child, and confirm the
+permitted views work while every forbidden action is refused — including when the request is made
+directly rather than through the interface. Then, as the child, follow a third trainer's invitation
+link and confirm no association is created and the parent receives the email.
+
+**Acceptance Scenarios**:
+
+1. **Given** a parent viewing one of their children, **When** they supply an email address for that
+   child and grant them a sign-in, **Then** a Player/Parent account is created for the child, linked
+   to the parent, and the child is invited to choose their own password through the same setup-link
+   flow any invited account uses.
+2. **Given** an email address already belonging to any account, **When** the parent supplies it for
+   a child, **Then** it is refused as a duplicate under the existing uniqueness rule and no child
+   sign-in is created.
+3. **Given** a child who has set their password, **When** they sign in, **Then** they land in their
+   own area showing only their own player profile and their own trainers.
+4. **Given** a signed-in child, **When** they browse their program, view what they are booked into,
+   view their own progress, view their token balance, or change their own photo and preferences,
+   **Then** each of those succeeds.
+5. **Given** a signed-in child, **When** they attempt to add or remove a trainer, change a payment
+   method, buy tokens, complete a purchase, delete their account, or change any setting belonging to
+   the parent, **Then** each attempt is refused, whether made through the interface or by addressing
+   the platform directly.
+6. **Given** a signed-in child, **When** they attempt to reach their parent's training or a sibling's
+   training, **Then** the attempt is refused and nothing about it is disclosed to them.
+7. **Given** a child associated with several trainers, **When** they sign in, **Then** a switcher
+   lists their own trainers only, with no grouping for the account holder and no sibling anywhere in
+   it.
+8. **Given** a child associated with exactly one trainer, **When** they sign in, **Then** no switcher
+   is offered.
+9. **Given** a signed-in child, **When** they open a valid trainer invitation link, **Then** no
+   association is created, they are told to ask their parent to register them with that trainer, and
+   nothing about their account changes.
+10. **Given** a child has followed a new trainer's link, **When** the block takes effect, **Then**
+    an email reaches the parent naming the child and the trainer, carrying the link and a way to
+    review the request.
+11. **Given** a child who follows the link of a trainer they already train with, **When** the block
+    would apply, **Then** they are simply told they are already connected and the parent is not
+    emailed.
+12. **Given** a parent, **When** they revoke a child's sign-in, **Then** the child can no longer sign
+    in, any session they held stops working immediately, and the child's profile, trainers and
+    history are all untouched.
+13. **Given** a child account, **When** anything about it is emailed other than its own password
+    setup or reset, **Then** that email goes to the parent's address rather than the child's.
+
+---
+
+### User Story 12 - A Parent Approves or Denies What Their Child Asks For (Priority: P2)
+
+Whenever a child asks for something that costs money or changes who they train with, the request
+stops and waits. The child sees it sitting at **Pending Parent Approval**; the parent gets an email
+and an in-app notice naming the child, what is being asked, and the amount if there is one. From
+their pending list the parent can approve it — at which point the platform carries the action out
+exactly as if the parent had done it themselves — deny it, or ask the child for more information
+before deciding. Any of the three can carry a note. Nothing happens on its own except the clock: a
+request left untouched for 48 hours expires, which denies it, and both the parent and the child are
+told. USD payments always come through here and no setting can turn that off. Token spending comes
+through here too by default, though a parent may decide, child by child, that a particular child can
+spend tokens without asking.
+
+**Why this priority**: This is the mechanism that makes a child's sign-in trustworthy, and the epic's
+central family rule. It is P2 rather than P1 because a child must be able to sign in and ask for
+something before there is a request to approve — but it is the story this extension exists to
+deliver.
+
+**Independent Test**: As a child, follow a new trainer's invitation link to raise a join request.
+Sign in as the parent, find it in the pending list, and approve it — confirm the child is now
+associated with that trainer and sees the status change. Repeat with a denial, and repeat a third
+time letting the clock run past 48 hours, confirming the request expires as denied and the child is
+never associated. This exercises the whole workflow end to end without any payment existing.
+
+**Acceptance Scenarios**:
+
+1. **Given** a child raises a request that needs approval, **When** it is created, **Then** its
+   status reads Pending Parent Approval, the child can see it and its status, and the requested
+   action has not been carried out.
+2. **Given** a request has just been created, **When** the parent is notified, **Then** both an email
+   and an in-app notice reach them naming the child, what is requested, and the amount and currency
+   when there is one.
+3. **Given** a parent with pending requests, **When** they open their pending list, **Then** each
+   entry shows the child, what is asked, the amount if any, when it was requested, and how long
+   remains before it expires.
+4. **Given** a pending request, **When** the parent approves it, **Then** the requested action is
+   carried out under exactly the rules that would apply had the parent performed it, the status
+   becomes approved, and the child sees the status change.
+5. **Given** a pending request, **When** the parent denies it, **Then** the action is not carried
+   out, the status becomes denied, and the child is told, together with the parent's note if one was
+   given.
+6. **Given** a pending request, **When** the parent asks for more information and adds a note,
+   **Then** the child is shown that note and can reply, which returns the request to pending without
+   restarting its expiry.
+7. **Given** a request that has been pending for 48 hours with no decision, **When** the deadline
+   passes, **Then** the request expires as a denial, the action is not carried out, and both the
+   parent and the child are notified.
+8. **Given** an approval whose action cannot be carried out — the trainer's link has since been
+   revoked, or the child was meanwhile removed — **When** the parent approves, **Then** they are told
+   why it could not be completed and the request is not left recorded as approved-but-undone.
+9. **Given** a child with a pending request, **When** they attempt to approve it themselves or to
+   carry out the underlying action directly, **Then** the attempt is refused.
+10. **Given** a child with a pending request, **When** they withdraw it, **Then** it closes as
+    withdrawn, the action is not carried out, and the parent's pending list no longer offers it.
+11. **Given** a parent, **When** they attempt to resolve a request belonging to a child on another
+    account, **Then** the attempt is refused.
+12. **Given** a child who has already raised a request for something, **When** they raise the same
+    request again while the first is still pending, **Then** no second request is created and they
+    are shown the one already waiting.
+13. **Given** a request for a USD payment and a parent who has switched on unsupervised token
+    spending for that child, **When** the child requests the USD payment, **Then** it still requires
+    approval, because no setting can waive that.
+14. **Given** a child whose parent has left unsupervised token spending off, **When** the child
+    spends tokens, **Then** the spend waits for approval exactly as a payment does.
+15. **Given** a child whose parent has switched unsupervised token spending on, **When** the child
+    spends tokens, **Then** the spend completes immediately and the parent receives a notice that
+    tells them what happened without asking them to decide anything.
+16. **Given** a parent who changes the token setting for one child, **When** they look at their other
+    children, **Then** those children's settings are unchanged, and any request already pending is
+    unaffected by the change.
+17. **Given** a resolved request, **When** the audit trail is reviewed, **Then** it records the child,
+    the request, the decision, who made it, any note, and when.
+18. **Given** a parent account that is no longer active, **When** one of its pending requests is
+    reached, **Then** it cannot be approved by anyone, is never approved automatically, and expires
+    on its original schedule.
+
+---
+
+### User Story 13 - A Family Chooses Who Joins When a Parent Follows a New Trainer's Link (Priority: P3)
+
+A parent who already has children on the account follows a new trainer's invitation link. Rather
+than silently joining the parent alone — or, worse, the whole family — the platform asks who this is
+for: the account holder, any of the children, or several of them at once. Only the players ticked
+are associated with the new trainer.
+
+**Why this priority**: Without it a parent can still reach the same outcome, by joining themselves
+and then adding each child from the family page (Story 10). This story removes that detour at the
+moment the family is most likely to want it, which makes it a refinement rather than a capability.
+
+**Independent Test**: As a parent with two children, follow a third trainer's invitation link,
+select the account holder and one child, and confirm exactly those two are on the new trainer's
+roster while the other child is not.
+
+**Acceptance Scenarios**:
+
+1. **Given** a signed-in parent with at least one child, **When** they open a valid invitation link
+   for a trainer none of them train with, **Then** they are asked who will train with that trainer
+   and offered the account holder, if they hold a player profile, plus every child on the account.
+2. **Given** that question, **When** the parent selects one or more players and confirms, **Then**
+   exactly those players are associated with the trainer and no other player on the account is.
+3. **Given** that question, **When** the parent selects nobody and confirms, **Then** no association
+   is created and they are returned where they came from with nothing changed.
+4. **Given** a parent whose account holds no child profiles, **When** they open a new trainer's link,
+   **Then** no question is asked and they are associated exactly as Story 7 describes.
+5. **Given** some players on the account already train with that trainer, **When** the question is
+   shown, **Then** those players are shown as already connected and cannot be selected again, and
+   the link's usage count rises only by the number of new associations actually created.
+6. **Given** the parent selects several players, **When** the associations are created, **Then** the
+   parent's active context moves to the new trainer, using the account holder's profile if it was
+   selected and otherwise the first selected child.
+
+---
+
 ### Edge Cases
 
 - **Last Super Admin**: What happens when the only remaining active Super Admin account is
@@ -435,6 +748,49 @@ while a player in a different trainer's context sees the platform default.
   another person.
 - **Branding while signed in**: A branding change must reach people already using the portal on
   their next view, without requiring them to sign out.
+- **A child turning 18**: A child profile whose age crosses 18 must not silently become invalid or
+  lock the family out of it. The profile stays valid and parent-managed; moving that person onto an
+  account of their own is not specified here and must not be attempted implicitly.
+- **The parent's account is deactivated**: Deactivating a parent must not leave children able to
+  spend or commit unsupervised. Every child sign-in on that account stops working too, and pending
+  requests become unresolvable rather than approving themselves.
+- **The parent's account is erased**: A privacy erasure against a parent must not orphan a child
+  profile that other people's records point at. Children remain on trainers' rosters as "Deleted
+  User" exactly as the parent does, and nothing recoverable about either survives.
+- **A child sign-in outliving its profile**: When a child profile is removed, any sign-in granted to
+  that child must stop working; a credential must never outlive the player it belongs to.
+- **The same email for parent and child**: A parent supplying their own address as the child's
+  sign-in must be refused by the existing uniqueness rule, not accepted as a shared login.
+- **A child with no trainer at all**: A child created without a trainer, or whose only association
+  was removed, must see an empty state explaining they are not in a program, never an error.
+- **Two parents, one child**: Only the account that owns a child profile can manage it. A second
+  adult managing the same child is not specified here and must not be inferred from a shared email
+  or surname.
+- **A trainer removed while a join request is pending**: A pending request whose trainer has been
+  deactivated, or whose invitation link has been revoked, must fail cleanly on approval and say why,
+  rather than creating an association to something unusable.
+- **Approving twice**: A request resolved once must not be resolvable again, including when two
+  parent sessions approve the same request at nearly the same moment — one decision wins and the
+  other is told the request already closed.
+- **Expiry racing a decision**: A request reaching 48 hours at the same moment the parent approves it
+  must resolve exactly once, and the action must be carried out either fully or not at all.
+- **A price that moves between request and approval**: Approving must never charge an amount the
+  parent was not shown. If the underlying amount has changed, the request fails rather than
+  proceeding at the new figure.
+- **The token setting flipped mid-flight**: Switching unsupervised token spending on must not
+  auto-approve requests already waiting, and switching it off must not retroactively undo spends
+  already completed.
+- **A child requesting the same thing repeatedly**: Repeated identical requests must collapse onto
+  the one already pending rather than filling the parent's list with duplicates.
+- **A sibling's data through a shared account**: A child signed in must not reach a sibling's
+  training even though both profiles sit on one account — the isolation between siblings is as strict
+  as the isolation between trainers.
+- **A trainer seeing the rest of the family**: A trainer associated with one child must see that
+  child and the responsible parent's contact details, and must not learn of siblings on the same
+  account who do not train with them.
+- **Notification storms**: A parent with many children must not receive one email per child for the
+  same event, and a child repeatedly following the same blocked link must not generate an email each
+  time.
 
 ## Requirements *(mandatory)*
 
@@ -765,6 +1121,206 @@ while a player in a different trainer's context sees the platform default.
   of which may be absent. An absent value means the platform default and MUST be recorded as absent
   rather than as an empty value.
 
+**Player profiles: one account, a whole family (US-01.03)**
+
+- **FR-106**: System MUST allow one Player/Parent account to own one or more player profiles, and
+  MUST distinguish each profile as either the account holder's own or a child's. An account MUST hold
+  at most one profile of the account holder's own kind and any number of children's.
+- **FR-107**: System MUST store on every player profile a first and last name, an age, and a gender,
+  all required, plus optionally a school, a photo reference, and a jersey number. The
+  trainer-assigned skill level FR-007 defines MUST be held per profile and MUST remain uneditable by
+  the family.
+- **FR-108**: System MUST require the age on a profile of the account holder's own kind to be 18 or
+  above, and the age on a child's profile to be between 1 and 18, refusing any other value beside the
+  offending field. This is the same boundary FR-077 applies at registration.
+- **FR-109**: System MUST allow only a Player/Parent account to own player profiles, and MUST treat
+  an account holding a profile of the account holder's own kind as a player in every respect — the
+  parent trains alongside their children rather than merely administering them.
+- **FR-110**: System MUST warn a parent, before creating a child profile, when the account already
+  holds a child of a closely similar name and the same age, and MUST allow the parent to proceed
+  anyway. The warning MUST NOT block creation.
+- **FR-111**: Parents MUST be able to edit and to remove any player profile their account owns.
+  Removal MUST preserve every historical record attached to that profile, in the same way FR-038 and
+  FR-039 preserve the history of a deactivated account.
+- **FR-112**: System MUST refuse any attempt to read, edit, or remove a player profile the requester's
+  account does not own, unless the requester is a Super Admin. No Trainer, Coach, or other family may
+  create, edit, or remove a profile on someone else's account.
+- **FR-113**: System MUST hold the family's contact details — phone number and emergency contact —
+  against the parent account rather than per child, so a child profile carries no contact information
+  of its own.
+
+**Associations move from the account to the player profile (refines FR-084 to FR-092)**
+
+- **FR-114**: System MUST record every trainer association between one **player profile** and one
+  Trainer, replacing the account-level association the earlier slices defined. Every requirement that
+  previously spoke of associating an account — FR-078, FR-080, FR-082, FR-084, FR-085, FR-086,
+  FR-087, FR-088, FR-089, FR-090, FR-091, FR-092 — MUST be read with the player profile as its
+  subject. An account that holds exactly one profile MUST behave exactly as it did before this
+  change.
+- **FR-115**: System MUST keep each profile's associations wholly independent of every other profile
+  on the same account, including their originating invitation link, joining time, and status, so a
+  parent and each child may train with entirely different trainers.
+- **FR-116**: System MUST show a Trainer only the player profiles associated with that trainer,
+  together with the contact details of the account responsible for each, and MUST NOT reveal to that
+  trainer any other profile on the same account.
+- **FR-117**: System MUST define the active context of a signed-in family member as one pair of a
+  player profile and a trainer, and MUST scope every view they can reach to that pair alone. No view
+  MUST combine or total data across two profiles or across two trainers.
+- **FR-118**: System MUST present a parent a context switcher that groups their own player profile's
+  trainers separately from their children's, naming the child on every entry, and MUST NOT present a
+  switcher when the account has exactly one profile-and-trainer pair in total.
+- **FR-119**: System MUST present a signed-in child a context switcher listing only their own
+  trainers, with no grouping for the account holder and no sibling present in it, and MUST NOT
+  present one when the child has exactly one trainer.
+- **FR-120**: System MUST restore, when a family member signs in, the profile-and-trainer pair they
+  last used, and MUST fall back to another available pair — or to a plain statement that they are
+  connected to no trainer — when that pair is no longer available, extending FR-089 to the family
+  structure.
+- **FR-121**: System MUST hold the training data that later epics attach to a player — calendar,
+  reservations, attendance, availability, tokens, content — per player profile per trainer, so that
+  the separation this feature establishes is inherited rather than retrofitted.
+
+**Choosing a child's trainers when the profile is created (US-01.03)**
+
+- **FR-122**: System MUST, while a parent is creating a child profile, ask which trainers the child
+  will train with, presenting a single question naming the trainer when the parent is associated with
+  exactly one, a selection list when the parent is associated with several, and no question at all
+  when the parent is associated with none.
+- **FR-123**: System MUST associate a newly created child only with the trainers the parent
+  explicitly chose, and MUST create the profile with no association at all when the parent chose
+  none. An association MUST NEVER be inferred from the parent's own associations without the parent
+  saying so.
+
+**A parent manages each child's trainers (US-01.04)**
+
+- **FR-124**: Parents MUST be able to see, for every player profile on their account, that player's
+  name and age and every trainer they are associated with together with the date each association
+  began.
+- **FR-125**: Parents MUST be able to add a trainer to any player profile on their account in two
+  ways: by supplying that trainer's invitation link, which is validated under FR-070 exactly as any
+  other use of it, or by selecting from the trainers the parent's account is already associated with.
+- **FR-126**: Parents MUST confirm the removal of an association through a prompt naming the player
+  and the trainer and stating that upcoming reservations with that trainer will be cancelled. On
+  confirmation the association MUST become inactive, the trainer's roster MUST no longer list that
+  player, and every historical record of what happened under it MUST remain intact.
+- **FR-127**: System MUST reuse the same player profile when a previously removed trainer is added
+  again, MUST NOT create a duplicate profile, and MUST leave the earlier history attached to it.
+- **FR-128**: System MUST restrict the addition and removal of a player profile's associations to the
+  account that owns the profile, and to Super Admins; a signed-in child MUST NOT be able to change
+  any association, including their own.
+
+**A child's own sign-in (US-01.06)**
+
+- **FR-129**: Parents MUST be able to grant a child their own sign-in by supplying an email address
+  for that child. The platform MUST create a Player/Parent account holding that address, linked to
+  the parent's account and to that child's profile, subject to the email uniqueness rule FR-004
+  states, and MUST invite the child to set their own password through the setup-link flow FR-025 to
+  FR-027 define.
+- **FR-130**: System MUST send every notification concerning a child — approval requests, decisions,
+  reservations, financial notices — to the parent's email address. A child's own address MUST receive
+  nothing but the credential mail for that child's own account: the setup link FR-129 requires, and
+  any password reset for it once self-service reset exists.
+- **FR-131**: A signed-in child MUST be able to browse the events their trainers offer without
+  committing to them, view content already available to them, view their own progress, view their own
+  token balance without spending it, update their own photo and preferences, move between their own
+  trainer contexts, and raise a request for their parent to approve.
+- **FR-132**: System MUST refuse a signed-in child every one of the following: joining a new trainer,
+  changing any trainer association, adding or removing a payment method, purchasing tokens,
+  completing any purchase without an approval, deleting their own account, owning a child profile of
+  their own, reading or changing anything belonging to the parent or to a sibling, and changing any
+  setting the parent owns — including the setting that governs their own token spending.
+- **FR-133**: System MUST enforce every restriction in FR-132 when the request is received, not only
+  by withholding a control, exactly as FR-015 requires.
+- **FR-134**: Parents MUST be able to revoke a child's sign-in at any time. Revocation MUST end every
+  session that child holds immediately, under FR-012, and MUST leave the child's profile,
+  associations, and history untouched.
+- **FR-135**: System MUST end a child's sign-in when that child's profile is removed, so no credential
+  outlives the player it belongs to; and MUST NOT allow a child account to convert itself into an
+  independent account.
+- **FR-136**: System MUST stop every child sign-in on an account whose parent has left Active status,
+  and MUST restore them when the parent is reactivated, so a child can never act while the
+  responsible adult cannot.
+
+**A child follows a trainer's invitation link (US-01.06)**
+
+- **FR-137**: System MUST refuse to associate a signed-in child through a trainer invitation link.
+  It MUST tell the child to ask their parent to register them with that trainer, and MUST change
+  nothing about the child's account, profile, or associations.
+- **FR-138**: System MUST, when it blocks a child in this way, raise an approval request of the
+  join-a-trainer kind against the responsible parent and MUST email that parent, naming the child and
+  the trainer, carrying the invitation link and a way to review the request.
+- **FR-139**: System MUST NOT raise a second request when one for the same child and the same trainer
+  is already pending; it MUST surface the pending one instead, and MUST NOT email the parent again.
+- **FR-140**: System MUST tell a child who follows the link of a trainer they already train with that
+  they are already connected, and MUST raise no request and send no email.
+
+**Approval requests: the Pending Parent Approval workflow (US-01.05)**
+
+- **FR-141**: System MUST record every approval request with the child profile it concerns, the
+  parent account that must resolve it, its kind, what is being requested, the amount and currency
+  when the request is financial, its status, when it was raised, when it expires, the note attached
+  to its resolution if any, who resolved it, and when.
+- **FR-142**: System MUST support exactly these request kinds: joining a trainer, a payment in USD,
+  and a spend of tokens. The join-a-trainer kind MUST be carried out by this feature. The payment and
+  token kinds MUST have their rules and their recorded data in place here, while the act of taking
+  payment and of debiting tokens belongs to Epic-05; a request of either kind MUST NOT be marked
+  approved until that act can be performed.
+- **FR-143**: System MUST support exactly these request statuses — Pending Parent Approval, Info
+  Requested, Approved, Denied, Expired, and Withdrawn — and MUST permit only these transitions: from
+  Pending Parent Approval to any of Info Requested, Approved, Denied, Expired, or Withdrawn; and from
+  Info Requested back to Pending Parent Approval or on to Denied, Expired, or Withdrawn. Approved,
+  Denied, Expired, and Withdrawn MUST be terminal.
+- **FR-144**: System MUST NOT carry out the action a request concerns while that request is in any
+  status other than Approved, and MUST carry it out exactly once when the request becomes Approved.
+- **FR-145**: System MUST always require parent approval for a payment in USD, and MUST provide no
+  setting, per child or otherwise, capable of waiving it.
+- **FR-146**: System MUST hold, per child profile, a parent-owned setting governing whether that child
+  may spend tokens without approval, defaulting to off. While it is off a token spend MUST follow the
+  same approval workflow a USD payment follows. While it is on a token spend MUST proceed immediately
+  and the parent MUST receive a notice that reports what happened without asking them to decide
+  anything.
+- **FR-147**: System MUST keep the token setting independent for each child, MUST allow the parent to
+  change it at any time, and MUST leave every already-pending request unaffected by a change, neither
+  approving nor denying it.
+- **FR-148**: System MUST notify the parent by email and in the application the moment a request is
+  raised, naming the child, what is requested, and the amount and currency when the request is
+  financial.
+- **FR-149**: Parents MUST be able to see a list of the requests awaiting them showing, for each, the
+  child, what is asked, the amount if any, when it was raised, and how long remains before it
+  expires.
+- **FR-150**: Parents MUST be able to approve, deny, or ask for more information on any request
+  awaiting them, and MUST be able to attach a note to any of those three responses.
+- **FR-151**: System MUST carry out an approved request's action under exactly the permissions and
+  validation that would apply had the parent performed it directly. When the action cannot be
+  completed — the invitation link has been revoked, the trainer is no longer Active, the profile has
+  been removed — the platform MUST tell the parent why, MUST NOT record the request as Approved, and
+  MUST leave it awaiting a further decision.
+- **FR-152**: System MUST refuse to carry out an approved financial request whose amount no longer
+  matches the amount the parent was shown, failing the request rather than proceeding at a different
+  figure.
+- **FR-153**: System MUST show the child, in their own view, the status of every request they raised
+  and the moment it changes, and MUST deliver the parent's note to the child when the parent denied
+  the request or asked for more information.
+- **FR-154**: Children MUST be able to withdraw a request they raised while it is still awaiting a
+  decision, which closes it as Withdrawn without carrying out the action and removes it from the
+  parent's list.
+- **FR-155**: System MUST expire a request 48 hours after it was raised when no decision has been
+  taken. Expiry MUST have the effect of a denial, MUST NOT carry out the action, and MUST notify both
+  the parent and the child. A return from Info Requested to Pending Parent Approval MUST NOT restart
+  that 48-hour clock.
+- **FR-156**: System MUST restrict the resolution of a request to the parent account that owns the
+  child profile, and to a Super Admin acting in support. A child MUST NOT resolve their own request,
+  and no one MUST be able to resolve a request twice — where two attempts arrive together, exactly
+  one MUST take effect and the other MUST be told the request has already closed.
+- **FR-157**: System MUST NOT allow a request belonging to a parent account that has left Active
+  status to be resolved by anyone, MUST NOT approve it automatically, and MUST let it expire on its
+  original schedule.
+- **FR-158**: System MUST record every approval decision in the audit trail under FR-054 and FR-055,
+  naming the child profile, the request, the decision taken, the account that took it, any note, and
+  the time.
+- **FR-159**: System MUST present a parent's awaiting requests through the navigation frame FR-062
+  describes, carrying a count while any are pending, so the workflow satisfies the reachability rule
+  FR-105 sets.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -781,10 +1337,23 @@ while a player in a different trainer's context sees the platform default.
 - **Coach Detail**: A Coach's professional presentation — biography, credentials, certifications,
   and whether the profile is publicly visible. The single-trainer assignment that Epic-01 also
   describes is out of scope here.
-- **Player Detail**: A player's participation attributes — school, jersey number, and the
-  trainer-assigned skill level that the player cannot edit. Parent/child linkage is out of scope
-  here.
-- **Parent Contact Detail**: Emergency contact information held against a Player/Parent account.
+- **Player Profile** *(was Player Detail; widened by the 2026-08-27 extension)*: One player who
+  trains. Holds first and last name, age, gender, optional school, photo and jersey number, the
+  trainer-assigned skill level the family cannot edit, and which kind of player it is. One or more per
+  Player/Parent account — at most one of the account holder's own kind, any number of children's.
+  The subject of every trainer association, every context, and every approval request. Removed
+  softly, never erased, so history stays attached.
+- **Player Profile Kind**: The fixed pair of values distinguishing the account holder's own player
+  profile from a child's. Governs the permitted age range, whether a sign-in may be granted, and how
+  the profile is grouped in a context switcher.
+- **Parent Contact Detail**: Emergency contact information and the family phone number, held against
+  the Player/Parent account rather than against any individual child profile. One per account,
+  serving every child on it.
+- **Child Sign-In Account**: A child's own means of entry, when the parent grants one — a
+  Player/Parent account holding the email address the parent supplied, tied to exactly one child
+  profile and to the parent's account. Carries no contact details of its own and receives no mail but
+  its own password setup and reset. Revocable by the parent, suspended while the parent is not
+  Active, and ended when the child profile is removed.
 - **Session**: An admitted person's continuing access, with issue time, last-activity time, and
   expiry. Ends on sign-out, on inactivity, and whenever the account leaves Active status.
 - **Credential Setup Invitation**: A single-use, time-limited permission to set a password for an account
@@ -798,13 +1367,30 @@ while a player in a different trainer's context sees the platform default.
   unguessable code. Holds the owning trainer, its creator, its kind, creation time, optional expiry,
   optional maximum uses, its running usage count, and whether it is active. One trainer has one
   standing player link at a time; replacing it retires the previous code.
-- **Trainer–Player Association**: The fact that one Player/Parent account trains with one Trainer.
-  Holds the trainer, the player account, the invitation link that produced it, when it was formed,
-  and its status. Many per player and many per trainer; the pair is unique. Survives the erasure and
-  the deactivation of either side.
-- **Active Trainer Context**: Which of a Player/Parent's trainers they are currently looking at.
-  Exactly one per player account at a time, remembered against the account so it is the same
-  wherever they sign in, and the boundary that scopes every view they see.
+- **Trainer–Player Association** *(subject narrowed by the 2026-08-27 extension)*: The fact that one
+  **player profile** trains with one Trainer. Holds the trainer, the player profile, the invitation
+  link that produced it, when it was formed, and its status. Many per profile and many per trainer;
+  the pair is unique. Independent of every other profile's associations on the same account. Survives
+  the erasure and the deactivation of either side, and survives its own removal as inactive history.
+- **Active Training Context** *(was Active Trainer Context; widened by the 2026-08-27 extension)*:
+  Which player profile and which of that profile's trainers a signed-in family member is currently
+  looking at. Exactly one pair per signed-in account at a time, remembered against the account so it
+  is the same wherever they sign in, and the boundary that scopes every view they see — separating
+  siblings from each other as strictly as it separates trainers.
+- **Approval Request**: One thing a child has asked for that a parent must decide. Holds the child
+  profile, the parent account responsible, the kind, what is being requested, the amount and currency
+  when financial, the status, when it was raised, when it expires, the resolving account, the note
+  attached to the resolution, and when it was resolved. Many per child; at most one pending per child
+  and subject at a time.
+- **Approval Request Kind**: The fixed set of things a child may ask for — joining a trainer, a
+  payment in USD, a spend of tokens. Determines whether approval can ever be waived and which epic
+  carries the action out.
+- **Approval Request Status**: The fixed set of states a request passes through — Pending Parent
+  Approval, Info Requested, Approved, Denied, Expired, Withdrawn — with the last four terminal. Only
+  Approved permits the requested action to happen, and it permits it exactly once.
+- **Child Token Spending Setting**: A parent-owned permission, held per child profile, deciding
+  whether that child's token spends wait for approval. Defaults to requiring approval, is changeable
+  at any time, never affects a request already pending, and can never waive a USD payment.
 - **Trainer Portal Branding**: The visual identity one Trainer presents to their own organization —
   a logo reference and a primary brand colour, either of which may be absent, plus when it last
   changed. Exactly one per Trainer account; absent values mean the platform default.
@@ -872,29 +1458,71 @@ while a player in a different trainer's context sees the platform default.
   reachable by clicking from that role's landing area or navigation frame, and 0% require an address
   to be typed — verified per role against the application's own route table rather than a hand-kept
   list.
+- **SC-027**: A parent can add a child and place them with a trainer, from opening the family page to
+  the child appearing on that trainer's roster, in under 2 minutes.
+- **SC-028**: Across a test set of accounts holding a parent and three children on overlapping
+  trainers, 100% of views show exactly one player profile and one trainer, and no view returns a
+  sibling's or the parent's data.
+- **SC-029**: 100% of the actions FR-132 forbids a child are refused when submitted directly to the
+  platform rather than through its interface, verified by a permission test covering every forbidden
+  action.
+- **SC-030**: A child who follows a new trainer's invitation link is associated with nobody in 100% of
+  attempts, and the parent's email arrives within 1 minute, exactly once per child-and-trainer pair
+  however many times the child repeats the attempt.
+- **SC-031**: 100% of child-initiated requests that need approval are recorded as Pending Parent
+  Approval and have no effect until approved, verified by inspecting the subject of the request after
+  the request is raised and before any decision.
+- **SC-032**: A parent is notified of a new request, by email and in the application, within 1 minute
+  of it being raised, and can go from that notice to a decision in under 1 minute.
+- **SC-033**: An approved join request results in the child being on the trainer's roster within 5
+  seconds of the decision, and the child sees the status change without signing out.
+- **SC-034**: 100% of requests left untouched for 48 hours are recorded as expired, have not carried
+  out their action, and have notified both the parent and the child — verified against a fixed clock.
+- **SC-035**: 100% of USD payment requests require approval regardless of every setting combination
+  tested, including every state of the per-child token setting.
+- **SC-036**: With unsupervised token spending off, 100% of a child's token spends wait for approval;
+  with it on, 100% complete immediately and produce an informational notice to the parent that
+  requests no decision.
+- **SC-037**: Changing one child's token setting leaves the other children's settings and 100% of
+  already-pending requests unchanged.
+- **SC-038**: In 100% of attempts to resolve one request twice — including two parent sessions
+  approving simultaneously, and an approval racing the 48-hour expiry — exactly one decision takes
+  effect and the underlying action happens either fully or not at all.
+- **SC-039**: 100% of approval decisions, including expiries, produce an audit entry naming the child
+  profile, the request, the decision, the actor, and the time.
+- **SC-040**: No trainer-facing view or export reveals a player profile on the same account that does
+  not train with that trainer, verified across every view available to a Trainer and to a Coach.
+- **SC-041**: Deactivating a parent stops 100% of that account's child sign-ins and leaves 100% of
+  its pending requests unresolvable within 1 minute, with none approving automatically.
 
 ## Out of Scope
 
 The following Epic-01 items are deliberately excluded from this feature and belong to later slices:
 
-- Parent-created child profiles, parent/child relationships, and child login constraints
-  (US-01.03, US-01.04, US-01.06). A registration through an invitation link therefore creates
-  exactly one player, not a family.
-- The family-member selection prompt US-01.02 describes for a parent joining an additional
-  trainer — "who will train with this trainer?", answered against the parent and their children
-  — is deferred with child profiles. Until then, joining a trainer associates the one player the
-  account holds.
 - Coach invitation links: the single-use, one-person, seven-day variety and the rule that a coach
   works for exactly one trainer (US-01.08). The invitation link record carries a kind so this can
   be added without restructuring, but no such link is issued here.
 - Reporting and analytics over invitation link usage, including conversion and referral tracking
   (Epic-06). Usage is recorded here; only later epics read it as analytics.
-- Trainer-side management of an existing association — removing a player from their roster, or a
-  parent editing which trainers a family member trains with (US-01.04). Associations here are
-  formed by joining and end only when an account leaves Active status.
+- Trainer-side management of an existing association — a Trainer removing a player from their own
+  roster. The *parent* side of US-01.04 is in scope as of the 2026-08-27 extension; the trainer's
+  ability to end an association from their end is not.
 - Branding beyond one logo and one primary colour: separate light and dark logos, font choices,
   and layout customization are Phase 2 in the epic.
-- Child purchase approval workflows (US-01.05).
+- The *execution* of the two financial approval kinds, though not their rules or their recorded
+  data. Taking a payment in USD and debiting a token balance belong to Epic-05, and the events a
+  child would be paying to attend belong to Epic-02. The approval workflow ships complete and
+  demonstrable in this feature through the join-a-trainer kind (FR-142); a payment or token request
+  cannot be approved until Epic-05 can carry it out.
+- Parent approval of a child's RSVP and of a child cancelling an RSVP, which US-01.06 also lists.
+  Reservations do not exist until Epic-02, so no second request kind with no subject is specified
+  here; the mechanism FR-141 to FR-159 define absorbs them as further kinds without restructuring.
+- Moving a child onto an independent account of their own — whether on turning 18 or at any other
+  point. Epic-01's business rules place everyone under 18 on a parent-managed account and its open
+  question Q-01.05 about 16-to-18-year-olds is resolved in favour of that rule, so no transition out
+  of the family is specified.
+- A second adult sharing management of the same child, and any transfer of a child profile between
+  accounts. One account owns each child profile.
 - Super Admin impersonation of other users and its audit log (US-01.07).
 - Player and coach availability, "Best Times", and availability conflict overrides
   (US-01.09, US-01.10).
@@ -985,3 +1613,81 @@ The following Epic-01 items are deliberately excluded from this feature and belo
 - **A player may belong to no trainer**: Super Admin-created Player/Parent accounts (FR-030) and
   accounts whose only trainer was deactivated hold zero associations. Such an account is assumed to
   be valid and to see an empty state rather than an error.
+
+**Assumptions added with the 2026-08-27 extension**
+
+- **How a child signs in** *(decided with the requester)*: Epic-01 says a child "can optionally have
+  separate login (shares parent's contact info)" without saying what they sign in *with*, while
+  FR-001, FR-004 and FR-008 identify and authenticate every account by a unique email address. The
+  decision taken is that the parent supplies a distinct email address for the child, which becomes
+  that child's login under the existing uniqueness rule, and that "shares parent's contact info" is
+  honoured by routing every notification to the parent and holding no contact detail on the child
+  (FR-129, FR-130). This leaves the ratified authentication model untouched. The known cost is that a
+  child with no email address of their own cannot be given a sign-in; that family uses the parent's
+  context switcher instead, which is no loss of capability.
+- **The approval workflow is one mechanism, not three** *(decided with the requester)*: Epic-01
+  describes the same wait-for-the-parent behaviour three times over — for a USD payment, for a token
+  spend, and, in US-01.06, for a child asking to join a trainer. It is assumed to be a single
+  mechanism with a kind, rather than three separate workflows, so the rules stated once apply
+  identically to all three and later kinds (RSVPs, cancellations) need no restructuring.
+- **Why the join-a-trainer kind carries the workflow now**: Events, payments and tokens arrive with
+  Epic-02 and Epic-05, so a purchase-only workflow would be a schema with nothing to approve and no
+  way to demonstrate. US-01.06's blocked invitation link is a genuine child-initiated request whose
+  subject exists in this feature today, so it is assumed to be the first implemented kind and the
+  vehicle by which the whole workflow is tested (FR-138, FR-142).
+- **Approval statuses**: Epic-01 names "Pending Parent Approval", approve, deny, "request more info",
+  and expiry. Two states are assumed beyond that list: *Info Requested* as a distinct status, because
+  "request more info" must be visible as something other than plain pending; and *Withdrawn*, because
+  a child who changes their mind should be able to clear their own request rather than leaving the
+  parent to deny it. Neither weakens the epic's rules.
+- **The 48-hour clock runs from the request**: Epic-01 states requests expire after 48 hours but not
+  what happens when a parent asks for more information partway. It is assumed the clock runs from
+  when the request was raised and is *not* restarted by that exchange, so a request cannot be held
+  open indefinitely by repeated questions.
+- **Expiry is a denial**: Epic-01 says expiry is an "auto-deny with notification". It is assumed to be
+  recorded as its own status rather than as an ordinary denial, so a parent who never saw the request
+  is distinguishable in the record from one who considered it and said no.
+- **Approval carries the action out**: Epic-01 says "Approve (payment processed)". It is assumed the
+  platform performs the action on the parent's behalf, under the parent's permissions, rather than
+  merely unlocking it for the child to complete — and consequently that an approval whose action
+  fails must not be left recorded as approved (FR-151).
+- **A price that has moved invalidates the request**: Epic-01 does not address an amount changing
+  between request and decision. It is assumed the parent must never be charged a figure they were not
+  shown, so the request fails rather than proceeding (FR-152). The alternative — charging the new
+  amount — was rejected as a consent problem.
+- **Associations belong to profiles, not accounts**: Epic-01 requires each child to have their own
+  trainers, calendar and availability, which cannot be expressed while an association joins an
+  account to a trainer. Moving the association's subject to the player profile is assumed to be the
+  intended structure, and FR-114 states it explicitly because it revises requirements the earlier
+  slices already implemented.
+- **Siblings are isolated from each other**: Epic-01 states a child cannot view the parent's training
+  but is silent on siblings. Isolation between siblings is assumed to be as strict as isolation
+  between trainers, since a child having a window into a sibling's schedule and spending would be a
+  surprising reading of "limited permissions".
+- **The trainer sees the child and the responsible adult**: Epic-01 requires the parent to own the
+  family's contact information and requires trainers to see their own roster. It is assumed a trainer
+  associated with a child sees that child plus the parent's contact details — they must be able to
+  reach the adult — and sees no sibling who does not train with them (FR-116).
+- **A child's own age boundary**: Child profiles run 1 to 18 and the account holder's own profile is
+  18 or over, carried over unchanged from FR-077 rather than restated as a new rule. Nothing is
+  specified about a child crossing 18, and FR-108 deliberately does not invalidate a profile that
+  does.
+- **Duplicate children are warned about, not prevented**: Epic-01 asks for a duplicate check on
+  similar name and age. Because twins and a child named after a parent are both ordinary, it is
+  assumed to be a warning the parent may overrule rather than a refusal (FR-110).
+- **Removing a child is a soft removal**: Epic-01 says a removed child-trainer relationship is
+  "soft-deleted (history preserved)". The same treatment is assumed for removing a child profile
+  altogether, consistent with how FR-038 treats a deactivated account, so a trainer's past rosters
+  and totals never change retrospectively.
+- **A child cannot act while the parent cannot**: Epic-01 does not say what happens to a child's
+  sign-in when the parent is deactivated. It is assumed to stop with the parent's (FR-136), because a
+  child able to commit the family while the responsible adult is locked out would defeat the purpose
+  of the approval workflow.
+- **Notification volume**: Epic-01 specifies which notifications are sent but not how often. It is
+  assumed that a repeated identical request produces no repeated email (FR-139) and that a parent
+  receives one notice per event rather than one per child, since the approval list is the system of
+  record and email is only the prompt to look at it.
+- **Cancelling reservations on removal**: The removal prompt states that upcoming reservations will be
+  cancelled, as Epic-01 words it. Reservations do not exist until Epic-02, so this feature is assumed
+  to state the consequence and to leave the cancellation itself to the epic that creates the thing
+  being cancelled.

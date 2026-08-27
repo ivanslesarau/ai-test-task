@@ -756,3 +756,504 @@ recorded as decisions the client may overturn cheaply, and R-33 is a dependency 
 Decisions R-21 through R-26, R-28, and R-30 through R-33 follow from the specification and from the
 architecture already in place, and are argued from those above rather than from external
 documentation.
+
+---
+
+# Phase 0 Research — Extension: Parent/Child Family Accounts & the Approval Workflow
+
+**Date**: 2026-08-27 | **Covers**: spec FR-106 – FR-159, SC-027 – SC-041, User Stories 9–13
+
+**Note on sources**: this slice adds no dependency and asks no question the platform's own shape
+cannot answer, so all but two of the decisions below are argued from the specification and from the
+architecture already built. The two exceptions are R-40 and R-41, whose claims about SQLite's partial
+indexes and about `UPDATE … RETURNING` row counts were checked against the SQLite documentation
+through Context7 and are cited at the end.
+
+**A note this part cannot avoid**: unlike the 2026-08-26 extension, this one is **not additive**.
+FR-114 moves the subject of a trainer association from the account to the player profile, and there is
+no way to hold "one account, several players, each with their own trainers" in a table whose primary
+key *is* the account. R-34 and R-35 are therefore migration decisions before they are design
+decisions, and they are the riskiest work in the slice. They are stated first for that reason.
+
+---
+
+## Part D — Decisions for the family-accounts extension
+
+### R-34: Player profiles get their own table with a surrogate key; `player_details` is superseded rather than extended
+
+**Decision**: Create `player_profiles` with its own `id` primary key and an `account_user_id`
+foreign key, carrying every column `player_details` held plus the family additions
+(`kind`, name, photo, the token-spending permission, the optional child sign-in link).
+**`player_details` is then dropped**, its rows having been migrated one-to-one. It does not survive as
+an empty shell or as a "self profile" special case.
+
+**Rationale**: `player_details.user_id` is both its primary key and its foreign key to `users`
+(data-model §4.3). That is a deliberate one-to-one, and it is exactly the constraint FR-106 removes.
+Three shapes were available and only one survives contact with the requirements:
+
+| Shape | Verdict |
+|---|---|
+| Add a surrogate `id` to `player_details` and relax the `user_id` uniqueness | Equivalent in the end state, but SQLite cannot alter a primary key in place, so Alembic's `batch_alter_table` rebuilds the table anyway. The rebuild is the cost, not the rename — and having paid it, the table keeps a name that now means "one of several players", which is what `player_details` does not say. |
+| Keep `player_details` for the account holder and add `child_profiles` for children | Rejected outright. Every association, every approval request, and every context would need to reference *either* table, which in SQL means two nullable foreign keys and a check constraint standing in for a discriminated union — the polymorphic-reference shape that Principle II exists to keep out of this codebase. It also duplicates a dozen columns and every validation rule that applies to them. |
+| One `player_profiles` table with a `kind` discriminator | **Chosen.** A child and a self-player differ in three rules (age band, whether a sign-in may be granted, whether name and photo are their own) and in nothing structural. A discriminator column plus check constraints expresses that; two tables express a difference that is not there. |
+
+**Consequence for the design**: `PlayerParentDetail` in the contract loses `school`,
+`jersey_number`, `skill_level`, `player_name`, `date_of_birth`, `gender`, `is_self`, and
+`active_trainer_id` — all of which are now per-profile, not per-account — and keeps only what remains
+true of the *account*: the emergency contact detail in `parent_contacts`. This is a **breaking
+contract change**, taken deliberately rather than papered over; see R-48.
+
+### R-35: The association's player column is re-pointed to the profile, in three revisions that separate structure from data
+
+**Decision**: Revisions 8, 9, and 10. Revision 8 creates the new tables and adds
+`trainer_player_associations.player_profile_id` as **nullable**. Revision 9 is a data migration,
+written in SQLAlchemy Core against `op.get_bind()`: one `player_profiles` row per existing
+`player_details` row, then `player_profile_id` backfilled on every association, then one
+`active_training_contexts` row per player who had a context. Revision 10 makes
+`player_profile_id` non-nullable, swaps the unique constraint from
+`(trainer_user_id, player_user_id)` to `(trainer_user_id, player_profile_id)`, drops
+`player_user_id`, and drops `player_details`.
+
+**Rationale**: the constraint that shapes this is that SQLite has no `ALTER COLUMN` and no
+`DROP CONSTRAINT`; every one of those steps is a table rebuild under `batch_alter_table`. Attempting
+them in the same revision as the backfill would mean rebuilding a table whose data is mid-flight, and
+a failure would leave a half-migrated schema that neither `upgrade` nor `downgrade` describes.
+Splitting on the structure/data/constraint boundary means each revision is individually reversible and
+each leaves the database in a state the ORM can read:
+
+- After 8, the old and new columns coexist and the application still works unchanged.
+- After 9, both are populated and consistent; this is the revision to verify before proceeding.
+- After 10, only the new shape remains.
+
+**Boundary this decision does not cross**: revision 9 uses Core `select`/`insert`/`update` constructs,
+exactly as revision 7's backfill did, so **the two documented raw-SQL exceptions stay at two**. No new
+exception is introduced by this slice.
+
+**Known limitation worth stating plainly**: revision 10 is the point of no return — once
+`player_details` is dropped, `downgrade` can restore the table and its rows for self-players but
+cannot restore a one-to-one world in which a parent's three children do not fit. The downgrade is
+written to fail loudly if any account holds more than one profile, rather than silently discarding
+children. A migration that quietly loses data is worse than one that refuses to run.
+
+### R-36: The active context moves off the player's row into its own table, keyed by the signed-in account
+
+**Decision**: A new `active_training_contexts` table keyed by `user_id`, holding a nullable
+`player_profile_id` and a nullable `trainer_user_id`. `player_details.active_trainer_user_id`
+(R-24) is retired.
+
+**Rationale**: R-24 put the context on the player's row because account and player were the same
+thing. They no longer are, and the context is now a *pair* — which profile, and which of that
+profile's trainers (FR-117). Two facts force it off the profile row:
+
+- A parent's context names a profile, so it cannot live *on* a profile without one child's row
+  holding a pointer to a sibling.
+- A child with their own sign-in and the parent both need a context, independently, over the same set
+  of profiles. Two viewers, one profile — so the context belongs to the viewer.
+
+Keying by `user_id` gives exactly one context per signed-in account, which is FR-117's "exactly one
+pair", and keeps FR-120's cross-device persistence for free, since it is stored against the account
+rather than the browser.
+
+**What carries over unchanged**: R-24's resolve-and-repair rule. The stored pair is still never
+trusted as read. One service function validates that the profile is still owned by (or is) the
+caller, that the association is still `active`, and that the trainer's account is still `active`;
+when any of those fails it selects another available pair, writes the correction back, and returns
+that. Extending the existing function is the whole change — FR-120 is R-24's rule with a wider
+candidate set.
+
+**Alternatives rejected**:
+
+- *Two columns on `users`.* Simple, and wrong: `users` is the account table for four roles, and three
+  of them can never hold a training context. A nullable-for-most-rows pair of foreign keys on the
+  most-read table in the system is a column that has to be explained every time it is seen.
+- *Keep it on the profile and let the parent's context be "the profile I last opened".* Collapses two
+  independent viewers onto one stored value, so a child signing in would move their parent's context.
+
+### R-37: A self-player's name and photo stay on the account; only a child's live on the profile
+
+**Decision**: `player_profiles.first_name`, `last_name`, and `photo_key` are `NULL` when
+`kind = 'self'` and `NOT NULL` (name) or optional (photo) when `kind = 'child'`, enforced by a check
+constraint. For a self profile the platform reads all three from `user_profiles`.
+
+**Rationale**: this continues a decision this document already made rather than making a new one.
+Data-model §19.1 introduced `player_name` as nullable precisely "so that correcting the account
+holder's name does not leave a stale copy behind for a self-registered player". That reasoning is
+unchanged by the family model; what changes is that a *child* has no `user_profiles` row to read from
+— a child without a sign-in has no `users` row at all — so a child's name has nowhere else to live.
+The check constraint makes the two cases exhaustive and mutually exclusive, so no row can be
+ambiguous about which source is authoritative.
+
+**Consequence for the design**: the child photo path and the account photo path are different
+endpoints writing different columns, both behind the existing photo storage port. A child's photo is
+uploaded by the parent, or by the child themselves under FR-131, and either way it lands on the
+profile row.
+
+**Alternative rejected**: *copy the account holder's name onto their self profile at creation and keep
+both.* It makes every read uniform, which is the appeal, and it reintroduces exactly the stale-copy
+bug §19.1 avoided — with the added twist that the profile copy is the one the trainer's roster shows.
+
+### R-38: A child's sign-in is an ordinary account, and "this is a child" is derived rather than stored twice
+
+**Decision**: Granting a child a sign-in creates a normal `users` row with role `player_parent` and
+the parent-supplied email, and records it as `player_profiles.sign_in_user_id` (nullable, unique).
+Whether the signed-in account is a child is **derived** — it is the account for which such a profile
+row exists — and is loaded in the same statement that resolves the session to its user, not as a
+second query.
+
+**Rationale**: the user's answer to the clarification settled the credential (a distinct email, so
+FR-001, FR-004, and FR-008 are untouched). What remained open was where "childness" lives. A
+`users.account_kind` column would be a second source of truth for a fact the profile table already
+states, and the two would diverge the first time a profile was moved or removed — at which point a
+revoked child would still be a child by the enum and no longer one by the relationship. Deriving it
+means the fact has exactly one home.
+
+**Rationale for loading it eagerly**: the permission gate FR-133 requires runs on every request, so
+the derivation must not cost a round trip. The current-user resolution already joins the session to
+the account; adding an outer join to `player_profiles` on `sign_in_user_id` makes the caller's identity
+carry "child, and of which profile, and whose parent" at no extra query. Enforcement then reads a
+value it already has, which is what keeps FR-132's twelve refusals cheap enough to apply
+unconditionally.
+
+**Alternatives rejected**:
+
+- *A fifth role, `child`.* Rejected firmly. FR-002 fixes the role set at four and calls a fifth "a
+  schema change, not a data entry"; every permission table, every role guard, and every landing-area
+  branch in the system enumerates four. A child is a `player_parent` with a narrower permission set,
+  which is a rule about the account's relationships, not a new kind of account.
+- *A boolean on `users`.* The second-source-of-truth problem above, for one bit.
+
+### R-39: One approval-request table with typed subject columns, not a JSON payload
+
+**Decision**: A single `approval_requests` table. The subject is expressed as **typed nullable
+columns** — `trainer_user_id`, `share_link_id`, `amount_minor`, `currency` — with check constraints
+tying each to its `kind`: `join_trainer` requires a trainer and forbids an amount; the two financial
+kinds require an amount and a currency.
+
+**Rationale**: FR-141's field list and FR-142's three kinds describe one mechanism with a
+discriminator, so one table is right (the alternative, a table per kind, triples the resolution logic
+and the parent's list becomes a union query). The question worth recording is how the *subject* is
+stored, and a JSON column is the obvious wrong answer: Principle II forbids untyped dicts precisely
+because a multi-role permission system that gets its subject wrong leaks data, and a JSON
+`{"trainer_id": …}` is unvalidated, unindexable, and unreferenced by any foreign key — so nothing
+would stop a request naming a trainer that no longer exists. Typed columns give the foreign keys that
+make R-42's failure mode (approving a request whose trainer has gone) a checkable condition rather
+than a lookup that returns nothing.
+
+**Boundary this decision does not cross**: the two financial kinds get their columns now and their
+executor later (R-46). `amount_minor` is an integer of minor currency units, not a float — money in a
+binary float is a defect waiting for its first rounding.
+
+**Alternative rejected**: *a generic `subject_type` / `subject_id` pair.* It is the JSON design with
+two columns instead of one: no foreign key, no per-kind constraint, and a join that cannot be
+expressed.
+
+### R-40: At most one live request per child and subject is a partial unique index, not a service check
+
+**Decision**: A unique index on `(player_profile_id, kind, trainer_user_id)` restricted to
+`WHERE status IN ('pending_parent_approval', 'info_requested')`.
+
+**Rationale**: FR-139 and FR-142's duplicate rule say a child who asks twice must land on the request
+already waiting. Enforced in the service, that is a read-then-write across two statements, and two
+requests arriving together both read "nothing pending" and both insert — which is the edge case
+"a child requesting the same thing repeatedly" filling the parent's list. This is the same shape as
+the association's unique pair (data-model §17), and it gets the same answer for the same reason: the
+service catches the integrity error and returns the existing request, so the rule is **true by
+construction rather than checked**. SQLite supports partial indexes, so the restriction to live
+statuses — which is what allows a second request after a denial — is expressible directly.
+
+**Consequence for the design**: the index must not cover the terminal statuses, or a child denied once
+could never ask again. That is the whole reason the index is partial.
+
+### R-41: Resolution is one conditional update whose row count is the decision
+
+**Decision**: Approving, denying, requesting information, and withdrawing are each a single
+`UPDATE … WHERE id = :id AND status IN (:live_statuses) AND expires_at > :now`, and the statement's
+**row count** decides the outcome: one row means this caller resolved it, zero means it was already
+resolved, already withdrawn, or already lapsed.
+
+**Rationale**: three separate requirements collapse into this one statement, which is why it is worth
+recording as a decision rather than left as an implementation detail.
+
+- FR-156's "no one may resolve a request twice" and SC-038's simultaneous-approval case are satisfied
+  without a lock, because the second statement matches no row.
+- The edge case "expiry racing a decision" is satisfied by the same predicate: a request that has
+  passed its deadline cannot be resolved even if the sweep (R-43) has not yet run, so the two paths
+  cannot both take effect.
+- FR-157's rule that a non-Active parent's requests are unresolvable is one more clause on the same
+  `WHERE`, joined to the parent's status.
+
+A read-then-write with an optimistic version column (R-10) would also work, and is what the account
+status changes use — but that pattern exists there to report a *conflict* to a Super Admin who needs
+to know the row moved. Here the caller needs to know only whether their decision was the one that
+counted, which a row count answers directly.
+
+**Consequence for the design**: because the deadline is a stored absolute timestamp (R-43), this
+predicate needs no computed expiry and no knowledge of when the request was raised.
+
+### R-42: An approval carries the action out in the same transaction, through a small executor registry
+
+**Decision**: One `ApprovalExecutor` protocol with a `kind` it handles and a method that performs the
+action. The approval service resolves the executor for the request's kind and calls it **inside the
+same transaction** as the status change. A domain error from the executor rolls back both, leaving the
+request live.
+
+**Rationale**: FR-151 requires the action to happen under the parent's permissions and FR-144 requires
+it to happen exactly once; both are properties of doing it in the transaction that sets `approved`. The
+part that needs a named seam is what happens when it *cannot* be done — FR-151's "must not be recorded
+as Approved" and the edge case where a trainer was deactivated while the request waited. A rollback
+gives that precisely: the parent is told why, and the request is still waiting for them.
+
+The registry rather than a branch is what makes R-46 honest. `join_trainer` has an executor; the two
+financial kinds do not, and an approval of a kind with no registered executor raises a domain error
+instead of silently succeeding. When Epic-05 lands it registers two executors and changes nothing
+else — the extension point is the reason the kinds can be specified now.
+
+**Alternative rejected**: *approve first, then perform the action in a follow-up step.* Two
+transactions, so a failure between them leaves a request marked approved whose action never happened —
+the exact state FR-151 forbids.
+
+### R-43: The deadline is an absolute stored timestamp; the sweep notifies, the predicate protects
+
+**Decision**: `expires_at` is written once at creation as `requested_at + 48 hours` and never
+recomputed. Two mechanisms then act on it, deliberately: R-41's predicate makes a lapsed request
+unresolvable **immediately**, and the existing maintenance routine materializes expiry — setting
+`expired` and sending the two notifications FR-155 requires.
+
+**Rationale**: FR-155 asks for two different things and a single mechanism cannot supply both. "The
+action is not carried out" must hold the instant the deadline passes, which only a read-time predicate
+guarantees; "both the parent and the child are notified" is an outbound side effect, which a predicate
+cannot do because nothing is reading at that moment. Pairing them is not redundancy — the predicate is
+the correctness guarantee and the sweep is the notification, and neither substitutes for the other.
+
+Storing the deadline rather than deriving it also makes FR-155's last sentence free: a return from
+Info Requested to Pending Parent Approval does not restart the clock, because there is no clock to
+restart — only a timestamp nobody rewrites.
+
+**Where the sweep lives**: `services/maintenance_service.py` already exists, already holds
+`prune_expired_sessions`, `prune_old_sign_in_attempts`, and `prune_old_link_lookup_attempts`, and is
+already invoked by the `python -m app.cli prune` subcommand. The application registers **no**
+lifespan hook and **no** background task, and this slice adds none. Expiry becomes one more method on
+that service and one more line in that subcommand — which is why this decision costs nothing
+structurally. The subcommand's help text widens from "expired sessions and old sign-in attempt
+records" to name approval expiry too, since a command whose description omits half its effects is how
+an operator ends up not scheduling it.
+
+**Known limitation worth stating plainly**: because the routine is invoked externally, notification
+timeliness is an operational property, not a code one. If nobody schedules it, requests still become
+unresolvable on time — the predicate guarantees that — but the "your request expired" email waits for
+the next run. SC-034 is therefore verified by invoking the routine against a fixed clock, and the
+deployment obligation to schedule it is recorded in the quickstart rather than assumed.
+
+**Alternatives rejected**:
+
+- *An `asyncio` background task in the app lifespan.* Ties a data-integrity job to process lifetime,
+  runs N times under N workers, and adds a lifespan hook the application has so far done without.
+- *A scheduler dependency such as APScheduler.* The locked stack forbids an addition, and this would
+  need a constitution amendment to schedule one job that `cron` or Task Scheduler already schedules.
+- *Lazy expiry alone, with no notification.* Fails FR-155's second half outright.
+
+### R-44: The token-spending permission is a column on the profile, not a settings table
+
+**Decision**: `player_profiles.tokens_without_approval`, boolean, not null, default `false`.
+
+**Rationale**: FR-146 describes exactly one setting, owned by the parent, held per child, defaulting
+to requiring approval. A column states that; a `child_settings` table states that there is a growing
+set of them, which there is not. The default belongs in the schema rather than in service code because
+FR-146's "defaulting to off" is a safety property — a row created by any path, including a future
+import, must not accidentally grant unsupervised spending.
+
+**Consequence for the design**: FR-147's "a change never affects a pending request" is automatic. The
+setting is consulted when a request is *created*, to decide whether one is needed at all; it is never
+read again during resolution, so flipping it cannot approve or deny anything already waiting.
+
+**Boundary this decision does not cross**: FR-145 is enforced independently of this column. A USD
+payment consults nothing — the code path that could waive it does not exist, rather than existing and
+being guarded by a setting that reads `false`.
+
+### R-45: A possible duplicate child is a refusal the parent can overrule, not a warning the server hopes they read
+
+**Decision**: `POST /me/players` answers a near-duplicate with **409** and a body listing the matching
+profiles. The parent re-submits with `acknowledge_possible_duplicate: true`, which creates the profile.
+
+**Rationale**: FR-110 requires a warning that does not block, which is a UI behaviour with no obvious
+server shape — and the obvious server shapes are both wrong. Creating the profile and returning a
+warning alongside it means the warning arrives after the thing it warns about, so "go back" is no
+longer available. Detecting duplicates only in the client means the check is absent from every other
+caller and unenforceable in a test. A refusal carrying the reason, plus an explicit acknowledgement to
+proceed, makes the two-step visible in the contract and testable without a browser: twins are one
+extra field, and a mis-click is caught.
+
+**On what counts as similar**: same account, same date of birth, and a case-insensitive match on the
+trimmed first and last name. Deliberately narrow — FR-110's duplicate is a parent submitting the same
+child twice, and a fuzzy match that catches "Jon" against "John" would fire on siblings named for the
+same relative.
+
+### R-46: The financial kinds ship as schema, rules, and a refusal — not as a pretence
+
+**Finding, not a decision**: FR-142 requires the USD and token kinds to have their rules and recorded
+data in place while their execution belongs to Epic-05, and FR-142's last clause requires that such a
+request "MUST NOT be marked approved until that act can be performed".
+
+**How the design handles it**: the kinds exist in the enum, the columns exist and are constrained, the
+approval rules (FR-145, FR-146) are enforced at request creation, and **no endpoint in this feature
+creates a request of either kind**. Should one arrive by any route, R-42's registry has no executor for
+it and approval raises a domain error rather than recording an approval whose payment never happened.
+
+**Why not stub the executor now**: a stub that "succeeds" would satisfy the type and violate the
+requirement, and the first test to pass against it would be a test asserting that money moved when it
+did not. Principle I's prohibition on code ahead of an approved spec applies to Epic-05's payment
+execution as much as to anything else.
+
+**This is a known and intended gap between FR-142 as written and what ships**, in the same spirit as
+R-33's coach-branding gap: recorded here, visible in the plan's Complexity Tracking, and closed by
+Epic-05 registering two executors.
+
+### R-47: Context-scoped query keys become profile-aware
+
+**Decision**: `ctxKeys` moves from `['ctx', trainerId, …]` to `['ctx', profileId, trainerId, …]`, and
+switching context still removes the whole `['ctx']` namespace.
+
+**Rationale**: R-26 fixed this convention early and said why — so that User Story 7's isolation rule
+would not have to be retrofitted across eight epics. That reasoning now pays out, and demands a
+change: FR-117 makes the isolation boundary a *pair*, so a key naming only the trainer would collide
+between two siblings training with the same trainer, and a cached roster or calendar would leak from
+one child's view into the other's. Adding the profile to the namespace is a two-line change today
+because the namespace still holds one entry; after Epic-02 it would be a sweep across every
+context-scoped hook.
+
+**Recorded as a refinement, not a silent change**: R-26 stands in full — the namespace and the
+drop-on-switch behaviour are unchanged. Only the key's shape widens, and the reason is the same reason
+R-26 gave for choosing a namespace at all.
+
+### R-48: Sibling isolation rides the context dependency; no endpoint takes a profile id it has not validated
+
+**Decision**: The `get_trainer_context` dependency becomes `get_training_context`, returning a
+validated `(player_profile_id, trainer_user_id)` pair. Every context-scoped endpoint depends on it and
+takes **no** profile identifier from the caller. Endpoints that must name a profile — the family
+management routes under `/me/players/{profile_id}` — validate ownership in the service against the
+caller's account.
+
+**Rationale**: R-25 established that no endpoint takes a `trainer_id`, because dozens of
+context-scoped endpoints are coming and one that forgets to validate is a cross-tenant read. FR-117
+adds a second axis with exactly the same hazard and a nastier failure mode: a sibling is on the *same
+account*, so an ownership check that stops at "does this profile belong to the caller's account?"
+passes for a child reading their brother's schedule. The dependency therefore validates the pair
+against the caller's *kind* — a parent may name any profile on their account, a child may name only
+the profile their sign-in is attached to — which is FR-132's sibling prohibition and FR-119's switcher
+rule enforced in one place rather than at each caller.
+
+**Consequence for the design**: SC-028 and SC-040 are testable as a sweep over every context-scoped
+route with a two-child fixture, which is the shape the existing cross-trainer isolation sweep already
+has. A permission matrix cannot replace it, for the reason the 2026-08-26 extension already recorded:
+"one trainer's data never appears in another's response body" is a different failure from "a role
+cannot reach an action", and sibling leakage is the same different failure.
+
+**Consequence for the API's shape** — worth stating because it looks arbitrary otherwise: CI enforces
+R-25 with a grep that fails the build on any `trainer_id` appearing in a `Path(` or `Query(`
+declaration outside the admin router. The family-management routes legitimately name a trainer, since
+FR-125 and FR-126 are a parent deliberately choosing one, so they name it **in a request body** — the
+channel `PUT /me/trainer-context` already uses — and remove an association by its **own identifier**
+(`DELETE /me/players/{profile_id}/trainers/{association_id}`) rather than by the trainer's. That is
+better addressing regardless, and it keeps the guard meaningful instead of accumulating the first
+exception that would teach the next reader to add another.
+
+### R-49: The contract changes shape rather than growing a parallel one
+
+**Decision**: `info.version` goes to **1.2.0**. `PlayerParentDetail` loses the player fields (R-34),
+`TrainerPlayerSummary` gains the profile identity and the responsible parent's contact detail, and
+`GET /me/trainers` is replaced by `GET /me/contexts` returning profile-and-trainer pairs. No
+versioned duplicate of any operation is kept.
+
+**Rationale**: these are breaking changes and the honest move is to make them once, while the only
+consumer is this repository's own frontend, which ships in the same commit. A parallel v1 shape would
+mean two roster serializers and two context endpoints to keep in step for the benefit of no external
+caller — and the contract test asserts the generated document against this file, so a divergence
+between them fails the build rather than reaching anyone.
+
+**Boundary this decision does not cross**: the URL prefix stays `/api/v1`. This is a pre-release
+contract revision, not a second public version, and inventing `/api/v2` for a schema the outside world
+has never seen would leave a permanent scar for a migration that costs nothing today.
+
+### R-50: A child's access follows the parent's status without a status of its own
+
+**Decision**: A child sign-in is refused, and its sessions revoked, whenever the owning parent's
+account is not Active. This is **evaluated from the parent's status**, not copied onto the child's
+row. Revocation of a child's sign-in by the parent (FR-134) is separate and *is* stored, as clearing
+`sign_in_user_id` and revoking that account's sessions.
+
+**Rationale**: FR-136 requires suspension to follow the parent in both directions — "MUST restore them
+when the parent is reactivated". A copied status would need the reverse propagation to be written,
+tested, and to not miss the erasure path; a derived one restores automatically because there was
+nothing to restore. The child's account keeps its own `status` for its own lifecycle (FR-135's rule
+that removing a profile ends the sign-in), so the two facts stay separable: *this account is
+switched off* and *this account's responsible adult is switched off* are different, and only the first
+belongs on the child's row.
+
+**Consequence for the design**: the check joins to the parent in the same statement R-38 already
+extended, so it costs nothing additional. Deactivating a parent revokes child sessions in the same
+transaction as the status change, which is how FR-012's "the moment" and SC-041's one-minute ceiling
+stay true by construction — the mechanism data-model §5 already uses.
+
+### R-51: Notifications fan in to the parent, once per event
+
+**Decision**: Every notification about a child is addressed to the parent's account email (FR-130).
+Where one event concerns several children, one message names them all rather than one message per
+child; where a child repeats an action that has already produced a pending request, no further message
+is sent (FR-139).
+
+**Rationale**: the edge case "notification storms" is the only requirement here, and it is a real
+failure mode rather than a nicety: a parent with four children who each follow the same trainer's link
+receives four emails about one decision, and a child who taps a blocked link five times sends five.
+The first is answered by addressing the *event* rather than the child; the second is answered for free
+by R-40's index, since no second request exists to notify about.
+
+**Boundary this decision does not cross**: R-11's design is unchanged — one `EmailSender` port, SMTP
+plus a filesystem sink, sent in-request with the failure surfaced. D-06's decision to add no outbox
+and no retry worker stands. A failed notification does not roll back the request it describes, exactly
+as FR-079 already established for the join confirmation.
+
+---
+
+## Consolidated decisions (family accounts)
+
+| ID | Area | Decision |
+|----|------|----------|
+| R-34 | Player profiles | New `player_profiles` table with a surrogate key and a `kind` discriminator; `player_details` dropped |
+| R-35 | Migration | Three revisions — structure, data, constraints — with a downgrade that refuses to discard children |
+| R-36 | Active context | Own table keyed by the signed-in account, holding a profile-and-trainer pair |
+| R-37 | Names and photos | A self profile reads the account's; a child's live on the profile, enforced by a check constraint |
+| R-38 | Child sign-in | An ordinary `player_parent` account; childness derived, loaded with the current user |
+| R-39 | Approval subject | One table, typed nullable columns per kind, no JSON payload |
+| R-40 | Duplicate requests | Partial unique index over the live statuses |
+| R-41 | Resolution | One conditional update; the row count is the decision |
+| R-42 | Approval execution | Executor registry, same transaction, rollback leaves the request live |
+| R-43 | Expiry | Stored absolute deadline; predicate protects immediately, maintenance routine notifies |
+| R-44 | Token permission | A boolean column on the profile, defaulting to requiring approval |
+| R-45 | Duplicate children | 409 plus an explicit acknowledgement, not a post-hoc warning |
+| R-46 | Financial kinds | Schema and rules now, no executor, approval refused rather than faked |
+| R-47 | Query keys | `['ctx', profileId, trainerId, …]` — R-26's namespace widened |
+| R-48 | Sibling isolation | Validated in the context dependency, which no caller can bypass |
+| R-49 | Contract | Breaking changes made once at 1.2.0; no parallel shape, no `/api/v2` |
+| R-50 | Child suspension | Derived from the parent's status, not copied |
+| R-51 | Notifications | Addressed to the parent, one per event |
+
+**No `[NEEDS CLARIFICATION]` markers were raised by this extension.** The two questions that could
+have become markers — what a child signs in with, and how the approval workflow is bounded while
+Epic-02 and Epic-05 are absent — were put to the user before the specification was written and are
+recorded in `checklists/requirements.md`; R-38 and R-46 implement those answers.
+
+## Sources (family accounts)
+
+- SQLite documentation, [Partial Indexes](https://www.sqlite.org/partialindex.html), retrieved through
+  Context7 — used in R-40 for the claim that a unique index may be restricted by a `WHERE` clause, on
+  which the "one live request per child and subject" rule depends.
+- SQLite documentation, [UPDATE](https://www.sqlite.org/lang_update.html) and
+  [ALTER TABLE](https://www.sqlite.org/lang_altertable.html) — used in R-41 for conditional-update
+  row-count semantics and in R-35 for the absence of `ALTER COLUMN` and `DROP CONSTRAINT`, which is
+  what forces the three-revision split.
+- [Alembic — Running "Batch" Migrations for SQLite](https://alembic.sqlalchemy.org/en/latest/batch.html)
+  for the table-rebuild behaviour R-35 plans around.
+
+Decisions R-34, R-36 through R-39, and R-42 through R-51 follow from the specification and from the
+architecture already in place, and are argued from those above rather than from external
+documentation.

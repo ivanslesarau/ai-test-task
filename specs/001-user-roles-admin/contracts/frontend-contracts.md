@@ -423,3 +423,194 @@ which is the valid-but-unusual case R-24 keeps the nullable column for.
 | `active_trainer_id` | `GET /auth/session` | The server repairs a stale or dangling context on read (R-24, FR-089). A locally remembered value would survive its own trainer's deactivation. |
 | `trainer_count` | `GET /auth/session` | Deciding whether to show the switcher from a cached list length shows a stale switcher for one frame after an association changes. |
 | `portal_branding` | `GET /auth/session`, or the join preview | Which trainer's branding applies is FR-101's rule, and it differs by role. One resolution, server-side. |
+
+# Extension: Family Accounts, Child Sign-In & Approvals
+
+**Date**: 2026-08-27 | **Covers**: spec User Stories 9–13 | **Decisions**:
+[research.md](./research.md) R-34 – R-51, especially R-47 and R-48
+
+**This extension changes contracts that already ship.** §21 lists every one, because the frontend
+and the API move together in one commit and a reader of §1–§14 needs to know which of those
+statements are superseded (R-49).
+
+## 15. Routes added
+
+| Route file | Path | Guard | Search params | Reached from |
+|---|---|---|---|---|
+| `routes/_authed/family.tsx` | — | Layout route: 403 view unless role is `player_parent` | — | Not navigable — layout only |
+| `routes/_authed/family/index.tsx` | `/family` | Player/Parent | — | Primary nav (§19) and the player landing area |
+| `routes/_authed/family/$profileId.tsx` | `/family/$profileId` | Player/Parent | — | A row on `/family` |
+| `routes/_authed/approvals.tsx` | `/approvals` | Player/Parent, parent only | `status` | Primary nav, with a pending count (FR-159) |
+| `routes/_authed/requests.tsx` | `/requests` | Player/Parent, child only | `status` | Primary nav for a child account |
+
+`/family/$profileId` carries the child's trainers, their sign-in, and their token-spending setting
+rather than being a second edit form: FR-124 and FR-128 put all three on one view of one child, and
+splitting them across routes would make "add a trainer to Maya" a two-step journey.
+
+**`use-nav-items.ts` stops returning an empty list for `player_parent`.** D-07 recorded that
+`coach` and `player_parent` yield no entries and that this was "correct rather than missing", because
+the feature gave them no page beyond `/profile`. This slice gives them three, so the descriptor list
+gains them — and the orphan-route test (T308) is what would otherwise fail, which is the mechanism
+D-07 put in place for exactly this. A parent sees Family and Approvals; a child sees Family (their own
+single profile) and Requests. `coach` still yields an empty list.
+
+## 16. Query keys added, and the `ctx` namespace widened
+
+```ts
+// entities/player-profile/api/query-keys.ts
+export const familyKeys = {
+  all: ['family'] as const,
+  profiles: ['family', 'profiles'] as const,
+  profile: (profileId: string) => ['family', 'profiles', profileId] as const,
+} as const
+
+// entities/approval/api/query-keys.ts
+export const approvalKeys = {
+  all: ['approvals'] as const,
+  queue: (search: ApprovalSearch) => ['approvals', 'queue', search] as const,
+  detail: (requestId: string) => ['approvals', 'detail', requestId] as const,
+  raised: (search: ApprovalSearch) => ['approvals', 'raised', search] as const,
+} as const
+
+// entities/trainer-context/api/query-keys.ts — THE context namespace, widened (R-47)
+export const ctxKeys = {
+  root: ['ctx'] as const,
+  scope: (profileId: string, trainerId: string) => ['ctx', profileId, trainerId] as const,
+} as const
+
+// entities/user/api/query-keys.ts — extended
+export const userKeys = {
+  // ... existing keys unchanged ...
+  contexts: ['users', 'me', 'contexts'] as const,      // replaces `trainers` (§21)
+  roster: (search: RosterSearch) => ['users', 'me', 'roster', search] as const,
+} as const
+```
+
+**Why the profile joins the `ctx` namespace**: R-26 chose a namespace so that Story 7's isolation
+rule would not have to be retrofitted across eight epics. FR-117 now makes the boundary a *pair*, and
+a key naming only the trainer would collide between two siblings training with the same trainer — one
+child's cached calendar served to the other. This is a two-line change while the namespace holds
+nothing; after Epic-02 it would be a sweep. R-26's namespace and its drop-on-switch behaviour are
+unchanged; only the key's shape widens.
+
+**Why the trainer's roster leaves the `ctx` namespace**: `ctxKeys.players(trainerId, search)` was the
+one entry in the namespace, and it was the odd one — the namespace's own comment says "a trainer is
+not in a switchable context", yet the roster was filed there. With `scope` now keyed by a *player*
+profile, a trainer's own roster does not fit the shape at all. It moves to `userKeys.roster`, beside
+`shareLink` and `branding`, which is where the comment always implied it belonged. Recorded as a
+correction rather than made silently.
+
+**Invalidation contract**
+
+| Mutation | Invalidates |
+|---|---|
+| `createChildProfile` | `familyKeys.profiles`, `userKeys.contexts`, `session` — a new child with trainers adds switchable pairs |
+| `updatePlayerProfile` | `familyKeys.profile(id)`, `familyKeys.profiles`; also `userKeys.contexts` when the name changed, since the switcher shows it |
+| `uploadPlayerPhoto` | `familyKeys.profile(id)`, `familyKeys.profiles` |
+| `deletePlayerProfile` | `familyKeys.profiles`, `userKeys.contexts`, `session`, and `removeQueries(ctxKeys.root)` — the active pair may have been the removed profile's |
+| `addPlayerTrainer` | `familyKeys.profile(id)`, `userKeys.contexts`, `session` |
+| `removePlayerTrainer` | `familyKeys.profile(id)`, `userKeys.contexts`, `session`, and `removeQueries(ctxKeys.root)` |
+| `grantChildSignIn` / `revokeChildSignIn` | `familyKeys.profile(id)`, `familyKeys.profiles` |
+| `switchTrainingContext` | `session`, then `removeQueries(ctxKeys.root)` before rendering (R-26, R-47) |
+| `acceptJoinLink` | `session`, `userKeys.contexts`, `familyKeys.profiles`, and `removeQueries(ctxKeys.root)` |
+| `approveApproval` / `denyApproval` / `requestInfoOnApproval` | `approvalKeys.all`; plus `userKeys.contexts`, `session`, and `familyKeys.profiles` after an **approval**, because a `join_trainer` approval created an association |
+| `withdrawRequest` / `respondToRequest` | `approvalKeys.all` |
+
+The asymmetry in that last-but-one row is the point: a denial changes only the request, while an
+approval performs the action, so it invalidates everything the action touched (FR-151).
+
+## 17. Zod schemas added
+
+| Schema | Slice | Mirrors | Rules |
+|---|---|---|---|
+| `createChildProfileSchema` | `features/family/add-child` | `CreateChildProfileRequest` | names 1–100 required; `date_of_birth` a past date whose derived age is 1–18; `gender` one of four; `school` ≤200 and `jersey_number` ≤10 both optional; `trainer_ids` an array of uuids, may be empty; `acknowledge_possible_duplicate` boolean defaulting false |
+| `playerProfileUpdateSchema` | `features/family/edit-player` | `PlayerProfileUpdate` | every field optional; names 1–100 when present and **absent entirely** for a `self` profile; `tokens_without_approval` present only for a parent |
+| `addPlayerTrainerSchema` | `features/family/add-trainer` | `AddPlayerTrainerRequest` | exactly one of `code` (8–64) or `trainer_id` (uuid) — a `.refine` on the object, not on either field, because the rule is about the pair |
+| `grantChildSignInSchema` | `features/family/grant-sign-in` | `GrantChildSignInRequest` | email ≤320; refuses the signed-in account's own address client-side too, so the common mistake is caught before a round trip |
+| `approvalDecisionSchema` | `features/approvals/decide` | `ApprovalDecisionRequest` | `note` optional, 1–1000 after trimming, `null` when blank |
+| `approvalInfoSchema` | `features/approvals/decide` | `ApprovalInfoRequest` | `note` **required**, 1–1000 |
+| `joinAcceptSchema` | `features/join/accept` | `JoinAcceptRequest` | `player_profile_ids` an array of uuids, may be empty — an empty selection is a valid submission that changes nothing |
+| `approvalSearchSchema` | `entities/approval/model` | the `status` query parameter | `status` an optional enum of the six; `page`, `page_size` ≤100, both `.catch(...)` as in §1 |
+
+Every one of these submit handlers routes its payload through the single `normalizeEmptyToNull`
+helper before `axios` sees it (D-01, constitution Principle VI). The two note fields are the reason it
+matters here: a parent who opens the note box, types nothing, and approves must send `null`, not `''`,
+or the server returns a 422 on a field the parent never filled in.
+
+## 18. State ownership — the queue, the countdown, and the duplicate dialog
+
+**Owned by TanStack Query**: the family list, each profile, the approval queue, the child's own
+requests. All of it is server state, and none of it is copied into a store.
+
+**Owned by the URL**: which status filter the queue is showing (`/approvals?status=`), for the same
+reason the directory's search lives there (§4).
+
+**Owned by Zustand**: nothing new. Three things that look like client state are not:
+
+- **The time remaining on a request** is *derived at render* from `expires_at`, which the server
+  wrote once (R-43). It is not stored, not counted down in a store, and never authoritative: a client
+  whose clock says thirty seconds remain may still receive a 409, because the server's predicate is
+  what decides (R-41). The interface therefore treats its own countdown as a hint and handles the 409
+  as an ordinary outcome rather than an error state.
+- **The duplicate-child dialog's contents** come from the 409 body, which lives in the mutation's
+  error state. Copying the matched profiles into a store would mean two sources for one dialog
+  (R-45).
+- **The family-member picker on the join page** is a form, and its selection lives in the form.
+
+## 19. The context switcher, regrouped
+
+The switcher stops being a flat list of trainers and becomes a grouped list of profile-and-trainer
+pairs, which is what FR-118 and FR-119 describe:
+
+```
+Parent who also trains                    Signed-in child
+─────────────────────────────             ─────────────────────────
+Your Training                             Coach Bob
+  Sarah (Me) → Coach Lisa                 Coach Lisa
+  Sarah (Me) → Coach Mike
+Your Children's Training
+  Alex → Coach Bob
+  Maya → Coach Bob
+  Maya → Coach Lisa
+```
+
+The grouping is derived from `player_profile_kind` on each entry: `self` entries under "Your
+Training", `child` entries under "Your Children's Training", and the group headings suppressed
+entirely for a child, whose list is flat and holds one profile (FR-119). No group heading is rendered
+for a group with no entries, so a parent who does not train sees only their children's section.
+
+`session.context_count` still decides whether the switcher appears at all — above one, exactly as
+`trainer_count` did (FR-118, FR-119).
+
+**A child's switcher must never contain a sibling**, and the frontend is not what guarantees it: the
+server returns only the caller's reachable pairs (R-48). The widget renders what it is given, which is
+why the isolation test is an API test rather than a component test.
+
+## 20. What the frontend must not infer — extended
+
+| Value | Source | Why not computed locally |
+|---|---|---|
+| `is_child_account` | `GET /auth/session` | Derived server-side from the existence of a profile naming this account (R-38). Inferring it from "has no children of its own" would misclassify a parent who has not added a child yet, and withholding controls is not the barrier anyway (FR-133). |
+| `context_count` | `GET /auth/session` | Same reason `trainer_count` was not computed from a list length: a stale switcher for one frame after a family change. |
+| `active_player_profile_id` | `GET /auth/session` | The server resolves and repairs the pair on read (R-36, FR-120). A remembered profile would survive its own removal. |
+| `display_name` on a profile or context entry | `GET /me/players`, `GET /me/contexts` | Whether a name comes from the profile or from the account depends on `kind` (R-37). One resolution, server-side; a client choosing would show a blank name for every `self` profile. |
+| `already_associated` on a selectable family member | `GET /join/{code}` | Requires the association list for every profile on the account, which a public page has not fetched (§14's reasoning for `viewer.state`, one level deeper). |
+| Whether a request is still actionable | the API's response to the action | The 48-hour deadline is enforced by a server predicate, not by the countdown (R-41, R-43). A client that greys out its own buttons and skips the call cannot know it lost a race. |
+| Whether a token spend needs approval | the API's response to the spend | `tokens_without_approval` is readable, but FR-145 makes USD approval unwaivable regardless of it. A client that decided locally would eventually decide wrong for a kind it did not know about. |
+
+## 21. Contracts that changed shape — what §1–§14 no longer says
+
+| Where | §1–§14 said | 1.2.0 says | Why |
+|---|---|---|---|
+| §9 `userKeys.trainers` | `['users', 'me', 'trainers']`, backing `GET /me/trainers` | `userKeys.contexts`, backing `GET /me/contexts` | Entries are pairs now, not trainers (R-49) |
+| §9 `ctxKeys.scope` | `(trainerId)` | `(profileId, trainerId)` | FR-117's boundary is a pair (R-47) |
+| §9 `ctxKeys.players` | in the `ctx` namespace | moved to `userKeys.roster` | A trainer is not in a switchable context — §16 |
+| §9 `switchTrainerContext` | mutation on `PUT /me/trainer-context` | `switchTrainingContext` on `PUT /me/context` | R-49 |
+| §10 `PlayerParentDetail` mirror | carried `school`, `jersey_number`, `skill_level` | those moved to `PlayerProfile` | An account holds several players (FR-106) |
+| §8 roster table | `TrainerPlayerSummary.player_user_id` | `player_profile_id` + `responsible_contact` | FR-114, FR-116 |
+| §14 `trainer_count` | a session field | `context_count` | R-49 |
+| D-07's `use-nav-items` | `player_parent` yields `[]` | yields Family and Approvals, or Family and Requests | §15 |
+
+Nothing else in §1–§14 changes. The axios layer (§5), the validation-timing rules (§7.1, §7.2), the
+navigation chrome (§7.3), the branding provider (§12), and the state-ownership categories (§4) all
+hold as written.
