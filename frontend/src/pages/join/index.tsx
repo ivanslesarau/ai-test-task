@@ -1,7 +1,10 @@
+import { useEffect, useRef } from 'react'
+
 import { useNavigate } from '@tanstack/react-router'
 
 import { useJoinPreview } from '@/entities/join/api/use-join-preview'
 import { useAcceptJoinLink } from '@/features/join/accept/api/use-accept'
+import { FamilyMemberPicker } from '@/features/join/accept/ui/family-member-picker'
 import { JoinRegisterForm } from '@/features/join/register/ui/join-register-form'
 import { Route as JoinRoute } from '@/routes/join.$code'
 import { isApiError } from '@/shared/api/errors'
@@ -14,6 +17,19 @@ export function JoinPage() {
   const navigate = useNavigate()
   const preview = useJoinPreview(code)
   const accept = useAcceptJoinLink(code)
+  // US11 (FR-137, FR-138): a signed-in child has no button to press here —
+  // arriving at this state IS the ask. The server always refuses this
+  // call with `child_must_ask_parent`; that refusal is what raises the
+  // approval request and emails the parent (T376/T377), so it is fired
+  // once, automatically, rather than waited on for a manual confirm the
+  // way `can_join` is.
+  const askedRef = useRef(false)
+  useEffect(() => {
+    if (preview.data?.viewer.state === 'child_must_ask_parent' && !askedRef.current) {
+      askedRef.current = true
+      accept.mutate(undefined)
+    }
+  }, [preview.data?.viewer.state, accept])
 
   function goHome() {
     void navigate({ to: '/' })
@@ -73,6 +89,14 @@ export function JoinPage() {
           <JoinRegisterForm code={code} onSuccess={goHome} />
         )}
 
+        {viewer.state === 'child_must_ask_parent' && (
+          <p className="text-body">
+            {accept.isPending
+              ? 'One moment…'
+              : `Ask your parent to register you with ${trainerName}. We've emailed them about it.`}
+          </p>
+        )}
+
         {viewer.state === 'can_join' && (
           <Button
             className="bg-brand-primary hover:bg-brand-primary-deep"
@@ -90,6 +114,15 @@ export function JoinPage() {
               Go to {trainerName}
             </Button>
           </div>
+        )}
+
+        {viewer.state === 'choose_family_members' && viewer.selectable_profiles && (
+          <FamilyMemberPicker
+            trainerName={trainerName}
+            selectableProfiles={viewer.selectable_profiles}
+            isPending={accept.isPending}
+            onSubmit={(body) => accept.mutate(body, { onSuccess: goHome })}
+          />
         )}
 
         {viewer.state === 'role_cannot_join' && (

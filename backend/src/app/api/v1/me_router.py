@@ -7,7 +7,7 @@ from app.core.deps import (
     CurrentUserDep,
     ProfileServiceDep,
     ShareLinkServiceDep,
-    TrainerContextServiceDep,
+    TrainingContextServiceDep,
     require_roles,
 )
 from app.models.enums import UserRole
@@ -15,7 +15,7 @@ from app.models.user import User
 from app.schemas.branding import PortalBranding, PortalBrandingUpdate
 from app.schemas.profile import OwnProfile, OwnProfileUpdate, PhotoUrls
 from app.schemas.share_link import ShareLinkOut
-from app.schemas.trainer_context import TrainerContextList, TrainerContextRequest
+from app.schemas.training_context import TrainingContextList, TrainingContextRequest
 
 router = APIRouter(prefix="/me", tags=["me"])
 
@@ -66,26 +66,32 @@ async def regenerate_own_share_link(
     return await share_link_service.regenerate(user)
 
 
-# --- Extension (2026-08-26): multi-trainer context --------------------------
+# --- Extension (2026-08-27): family accounts — profile-and-trainer context --
 
 
-@router.get("/trainers", response_model=TrainerContextList)
-async def list_own_trainers(
-    user: PlayerParentOnlyDep, trainer_context_service: TrainerContextServiceDep
-) -> TrainerContextList:
-    return await trainer_context_service.list_for_player(user)
+@router.get("/contexts", response_model=TrainingContextList)
+async def list_own_contexts(
+    user: PlayerParentOnlyDep, training_context_service: TrainingContextServiceDep
+) -> TrainingContextList:
+    """Replaces `GET /me/trainers` (research.md R-49) — every entry now
+    names both the profile and the trainer (FR-117, FR-118)."""
+    return await training_context_service.list_for_account(user)
 
 
-@router.put("/trainer-context", response_model=TrainerContextList)
-async def switch_trainer_context(
-    body: TrainerContextRequest,
+@router.put("/context", response_model=TrainingContextList)
+async def switch_training_context(
+    body: TrainingContextRequest,
     user: PlayerParentOnlyDep,
-    trainer_context_service: TrainerContextServiceDep,
-) -> TrainerContextList:
-    """The only endpoint that changes context. No other endpoint accepts
-    a trainer identifier, because context is a data-isolation boundary
-    rather than a view preference (research.md R-25)."""
-    return await trainer_context_service.switch(user, body.trainer_id)
+    training_context_service: TrainingContextServiceDep,
+) -> TrainingContextList:
+    """Replaces `PUT /me/trainer-context` (research.md R-49) — the only
+    endpoint that changes context. Both halves of the pair are named in
+    the body, never a path or query parameter, because context is a
+    data-isolation boundary rather than a view preference (research.md
+    R-25, R-48)."""
+    return await training_context_service.switch(
+        user, player_profile_id=body.player_profile_id, trainer_id=body.trainer_id
+    )
 
 
 # --- Extension (2026-08-26): trainer portal branding -------------------------

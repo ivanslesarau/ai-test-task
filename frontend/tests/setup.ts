@@ -37,6 +37,23 @@ globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserv
 URL.createObjectURL = () => 'blob:mock-object-url'
 URL.revokeObjectURL = () => {}
 
+// jsdom doesn't implement matchMedia, which sonner's <Toaster/> reads to
+// pick a light/dark theme on mount (US12, tasks.md T411 — the first test
+// suite to render Toaster alongside a page, for its decision-outcome
+// toasts).
+window.matchMedia =
+  window.matchMedia ||
+  (((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia)
+
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())

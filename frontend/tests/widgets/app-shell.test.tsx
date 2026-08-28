@@ -84,14 +84,16 @@ function mockPlayerParentSession() {
         first_name: 'Pat',
         last_name: 'Player',
         photo_url: null,
+        active_player_profile_id: null,
         active_trainer_id: null,
-        trainer_count: 0,
+        context_count: 0,
+        is_child_account: false,
       }),
     ),
     // TrainerContextSwitcher reads this unconditionally (it decides
     // switcher vs. label vs. nothing only after the query resolves).
-    http.get('/api/v1/me/trainers', () =>
-      HttpResponse.json({ active_trainer_id: null, trainers: [] }),
+    http.get('/api/v1/me/contexts', () =>
+      HttpResponse.json({ active_player_profile_id: null, active_trainer_id: null, contexts: [] }),
     ),
   )
 }
@@ -221,12 +223,16 @@ describe('AppShell', () => {
     expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument()
   })
 
-  it('renders no primary nav for a Player/Parent', async () => {
+  it('lists Family in the primary nav for a Player/Parent', async () => {
+    // Extension (2026-08-27, family accounts, tasks.md T365): supersedes
+    // "renders no primary nav for a Player/Parent" — D-07's empty list
+    // was correct only until this feature gave the role a page.
     mockPlayerParentSession()
     renderAt('/')
 
     await screen.findByText('Pat Player')
-    expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument()
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    expect(within(nav).getByRole('link', { name: 'Family' })).toBeInTheDocument()
   })
 
   it('marks the active section on the primary nav', async () => {

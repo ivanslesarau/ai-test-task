@@ -58,6 +58,17 @@ jobs:
             exit 1
           fi
 
+      # research.md R-48: ownership of a player profile is validated in
+      # the service against the caller, never selected by the caller — no
+      # endpoint accepts a player_profile_id query parameter (extension
+      # 2026-08-27, family accounts).
+      - name: No player_profile_id query parameter
+        run: |
+          if grep -rn "player_profile_id" src/app/api/ | grep "Query("; then
+            echo "::error::A player_profile_id query parameter was found — ownership must be server-resolved (research.md R-48)"
+            exit 1
+          fi
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

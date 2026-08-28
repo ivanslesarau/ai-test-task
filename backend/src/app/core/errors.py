@@ -97,3 +97,68 @@ class InvitationLinkInvalid(DomainError):
 class RoleCannotJoin(DomainError):
     """A signed-in caller whose role is not Player/Parent attempted to
     join a trainer through a player invitation link (FR-081)."""
+
+
+# --- Extension (2026-08-27): family accounts, child sign-in, approvals -----
+
+
+class PlayerProfileNotFound(DomainError):
+    """A `player_profiles` id that does not exist, does not belong to the
+    caller's account, or — for a signed-in child — belongs to a sibling
+    (FR-112, FR-132). One message for all three: a distinction would
+    confirm a sibling's profile exists (research.md R-48)."""
+
+
+class PossibleDuplicateProfile(DomainError):
+    """A `POST /me/players` submission matches an existing live profile
+    on the same account by date of birth and case-insensitive trimmed
+    name (research.md R-45). Carries the matching profiles, already
+    serialized to the `PlayerProfile` shape (contract's
+    `DuplicateProfileError.error.matches`), so the caller can see what
+    matched and re-submit with `acknowledge_possible_duplicate: true`
+    (FR-110)."""
+
+    def __init__(self, message: str, matches: list[dict]) -> None:
+        super().__init__(message)
+        self.matches = matches
+
+
+class ParentOnlyField(DomainError):
+    """A signed-in child attempted to write a field FR-132 reserves for
+    the owning parent — e.g. `tokens_without_approval` (FR-132, FR-147).
+    Refused on the request, never only by withholding the control
+    (FR-133)."""
+
+
+class ChildMustAskParent(DomainError):
+    """A signed-in child attempted an action FR-137 routes through the
+    Pending Parent Approval workflow instead — e.g. joining a trainer
+    directly. No association is created and nothing about the child's
+    account changes; an approval request is raised instead."""
+
+
+class RequestAlreadyResolved(DomainError):
+    """An approval request is no longer live — already approved, denied,
+    withdrawn, or lapsed — when a resolution was attempted (FR-156). The
+    conditional UPDATE's zero-row result is what raises this (research.md
+    R-41); the caller never read the row first."""
+
+
+class ApprovalSubjectUnavailable(DomainError):
+    """The subject of a `join_trainer` approval request is no longer
+    reachable at resolution time — the trainer's account is no longer
+    Active, or the share link's association already exists (FR-145)."""
+
+
+class ApprovalKindNotExecutable(DomainError):
+    """An approval request of a financial kind (`usd_payment`,
+    `token_spend`) was approved before Epic-05 registers an executor for
+    it (research.md R-42, R-46). FR-142's last clause: such a request
+    must not be marked approved until the action it approves can actually
+    be carried out."""
+
+
+class ApprovalAmountChanged(DomainError):
+    """The amount shown to the parent at approval time no longer matches
+    the amount recorded on the request (FR-152) — refused rather than
+    charging a different figure than the one the parent saw."""

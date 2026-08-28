@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 
 import { useNavigate } from '@tanstack/react-router'
 
-import { useSession } from '@/entities/session/api/use-session'
 import { useTrainerRoster } from '@/entities/trainer-context/api/use-roster'
 import type { RosterSearch } from '@/entities/trainer-context/model/roster-search'
 import { useDebouncedCallback } from '@/shared/lib/use-debounced-callback'
@@ -18,9 +17,8 @@ interface TrainerRosterTableProps {
  * (D-04): 500 ms, `replace: true` on the search term, normal history
  * entries for paging. */
 export function TrainerRosterTable({ search }: TrainerRosterTableProps) {
-  const { data: session } = useSession()
   const navigate = useNavigate({ from: '/trainer/players' })
-  const { data, isLoading, isError } = useTrainerRoster(session?.id ?? '', search)
+  const { data, isLoading, isError } = useTrainerRoster(search)
 
   const [searchTerm, setSearchTerm] = useState(search.q ?? '')
   useEffect(() => {
@@ -69,7 +67,7 @@ export function TrainerRosterTable({ search }: TrainerRosterTableProps) {
             </TableHeader>
             <TableBody>
               {data.items.map((player) => (
-                <TableRow key={player.player_user_id}>
+                <TableRow key={player.player_profile_id}>
                   <TableCell>{player.display_name}</TableCell>
                   <TableCell>{player.age ?? '—'}</TableCell>
                   <TableCell>{new Date(player.joined_at).toLocaleDateString()}</TableCell>

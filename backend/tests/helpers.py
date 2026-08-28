@@ -1,12 +1,24 @@
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import generate_share_link_code, generate_token, hash_password, hash_token
 from app.db.base import new_uuid, utcnow
+from app.models.approval import APPROVAL_REQUEST_TTL_HOURS, ApprovalRequest
+from app.models.association import TrainerPlayerAssociation
 from app.models.auth import Session as SessionModel
-from app.models.enums import AccountStatus, ShareLinkKind, UserRole
-from app.models.role_details import ParentContact, PlayerDetail, TrainerOrganization
+from app.models.enums import (
+    AccountStatus,
+    ApprovalRequestKind,
+    ApprovalRequestStatus,
+    AssociationStatus,
+    Gender,
+    PlayerProfileKind,
+    ShareLinkKind,
+    UserRole,
+)
+from app.models.player_profile import PlayerProfile
+from app.models.role_details import ParentContact, TrainerOrganization
 from app.models.share_link import ShareLink
 from app.models.user import User, UserProfile
 
@@ -92,14 +104,178 @@ async def create_trainer_with_link(
     return trainer, link
 
 
-async def create_player_with_detail(
-    db_session: AsyncSession, *, is_self: bool = True, **user_kwargs: object
-) -> User:
-    """A Player/Parent with its PlayerDetail and ParentContact rows —
-    what `create_user` alone omits, and what TrainerContextService
-    requires to resolve a context at all (extension 2026-08-26)."""
-    player = await create_user(db_session, role=UserRole.PLAYER_PARENT, **user_kwargs)
-    db_session.add(PlayerDetail(user_id=player.id, is_self=is_self))
-    db_session.add(ParentContact(user_id=player.id))
+async def create_player_profile(
+    db_session: AsyncSession,
+    *,
+    account: User,
+    kind: str = "self",
+    first_name: str | None = None,
+    last_name: str | None = None,
+    date_of_birth: date | None = None,
+    gender: str = Gender.PREFER_NOT_TO_SAY.value,
+    school: str | None = None,
+    jersey_number: str | None = None,
+    skill_level: str | None = None,
+    tokens_without_approval: bool = False,
+    sign_in_user_id: str | None = None,
+    photo_key: str | None = None,
+) -> PlayerProfile:
+    """One `player_profiles` row on `account` (data-model.md §26,
+    extension 2026-08-27). Replaces `create_player_with_detail`, which
+    created one `PlayerDetail` per account and is the single biggest
+    source of breakage this phase fixes (tasks.md T340) — `account` is
+    now an argument rather than created here, because a family account
+    may hold several profiles.
+
+    `kind='self'` forces `first_name`/`last_name` to `NULL`
+    (`ck_player_profiles_self_names`, research.md R-37) regardless of
+    what is passed; a `'child'` defaults to a distinct name so two
+    children on the same account do not collide by accident."""
+    if kind == PlayerProfileKind.SELF.value:
+        first_name, last_name = None, None
+        if date_of_birth is None:
+            date_of_birth = date.today() - timedelta(days=366 * 25)
+    else:
+        first_name = first_name or "Child"
+        last_name = last_name or "Test"
+        if date_of_birth is None:
+            date_of_birth = date.today() - timedelta(days=366 * 10)
+
+    now = utcnow()
+    profile = PlayerProfile(
+        id=new_uuid(),
+        account_user_id=account.id,
+        kind=kind,
+        first_name=first_name,
+        last_name=last_name,
+        photo_key=photo_key,
+        date_of_birth=date_of_birth,
+        gender=gender,
+        school=school,
+        jersey_number=jersey_number,
+        skill_level=skill_level,
+        tokens_without_approval=tokens_without_approval,
+        sign_in_user_id=sign_in_user_id,
+        removed_at=None,
+        created_at=now,
+        updated_at=now,
+    )
+    db_session.add(profile)
     await db_session.flush()
-    return player
+    return profile
+
+
+async def create_family(
+    db_session: AsyncSession, *, children: int = 2, with_sign_in: bool = False
+) -> tuple[User, list[PlayerProfile], list[User]]:
+    """A parent account, its `ParentContact`, and `children` CHILD
+    profiles (extension 2026-08-27, tasks.md T340). When `with_sign_in`
+    is true, each child also gets its own signed-in account and
+    `player_profiles.sign_in_user_id` names it (FR-129) — the fixture
+    Phase C's sibling-isolation tests need. Returns
+    `(parent, profiles, child_accounts)`; `child_accounts` is empty
+    unless `with_sign_in` is set."""
+    parent = await create_user(db_session, role=UserRole.PLAYER_PARENT)
+    db_session.add(ParentContact(user_id=parent.id))
+    await db_session.flush()
+
+    profiles: list[PlayerProfile] = []
+    child_accounts: list[User] = []
+    for i in range(children):
+        sign_in_user: User | None = None
+        if with_sign_in:
+            sign_in_user = await create_user(
+                db_session,
+                role=UserRole.PLAYER_PARENT,
+                email=f"child-{i}-{new_uuid()}@example.org",
+                first_name=f"Child{i}",
+            )
+            child_accounts.append(sign_in_user)
+
+        profile = await create_player_profile(
+            db_session,
+            account=parent,
+            kind=PlayerProfileKind.CHILD.value,
+            first_name=f"Child{i}",
+            last_name="Family",
+            sign_in_user_id=sign_in_user.id if sign_in_user is not None else None,
+        )
+        profiles.append(profile)
+
+    return parent, profiles, child_accounts
+
+
+async def create_association(
+    db_session: AsyncSession,
+    *,
+    trainer_id: str,
+    player_profile_id: str,
+    share_link_id: str | None = None,
+    status: str = AssociationStatus.ACTIVE.value,
+) -> TrainerPlayerAssociation:
+    """A `trainer_player_associations` row at profile granularity
+    (data-model.md §29.1). Centralizes what used to be a `_associate`
+    helper hand-rolled in every context/roster/isolation test file — each
+    one wrote `player_user_id` directly, which no longer exists."""
+    now = utcnow()
+    association = TrainerPlayerAssociation(
+        id=new_uuid(),
+        trainer_user_id=trainer_id,
+        player_profile_id=player_profile_id,
+        share_link_id=share_link_id,
+        status=status,
+        joined_at=now,
+        updated_at=now,
+    )
+    db_session.add(association)
+    await db_session.flush()
+    return association
+
+
+async def create_approval_request(
+    db_session: AsyncSession,
+    *,
+    player_profile_id: str,
+    parent_user_id: str,
+    kind: ApprovalRequestKind = ApprovalRequestKind.JOIN_TRAINER,
+    trainer_user_id: str | None = None,
+    share_link_id: str | None = None,
+    amount_minor: int | None = None,
+    currency: str | None = None,
+    status: ApprovalRequestStatus = ApprovalRequestStatus.PENDING_PARENT_APPROVAL,
+    requested_at: datetime | None = None,
+    expires_at: datetime | None = None,
+    parent_note: str | None = None,
+    child_note: str | None = None,
+    resolved_at: datetime | None = None,
+    resolved_by_user_id: str | None = None,
+) -> ApprovalRequest:
+    """A raw `approval_requests` row, bypassing `ApprovalRepository.insert`
+    so a test can set `expires_at` directly — the "injected clock" tests
+    (T403, T404) need a request already past its deadline without waiting
+    48 hours (research.md R-43). `requested_at`/`expires_at` default to
+    "just raised, expiring in 48 hours", matching `insert`'s own default."""
+    now = utcnow()
+    requested_at = requested_at or now
+    if expires_at is None:
+        expires_at = requested_at + timedelta(hours=APPROVAL_REQUEST_TTL_HOURS)
+    request = ApprovalRequest(
+        id=new_uuid(),
+        player_profile_id=player_profile_id,
+        parent_user_id=parent_user_id,
+        kind=kind.value,
+        status=status.value,
+        trainer_user_id=trainer_user_id,
+        share_link_id=share_link_id,
+        amount_minor=amount_minor,
+        currency=currency,
+        requested_at=requested_at,
+        expires_at=expires_at,
+        parent_note=parent_note,
+        child_note=child_note,
+        resolved_at=resolved_at,
+        resolved_by_user_id=resolved_by_user_id,
+    )
+    db_session.add(request)
+    await db_session.flush()
+    return request

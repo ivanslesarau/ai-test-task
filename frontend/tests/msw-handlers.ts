@@ -1,14 +1,18 @@
 import { http, HttpResponse } from 'msw'
 
 import type {
+  ApprovalRequestPage,
   CreatedUser,
   CurrentUser,
   OwnProfile,
+  TrainingContextList,
   UserDetail,
   UserPage,
 } from '@/shared/api/types'
 
 const BASE = '/api/v1'
+
+const DEFAULT_BRANDING = { logo_url: null, primary_color: null, updated_at: null }
 
 /**
  * Shared fixtures, shaped exactly like the contracts in
@@ -24,7 +28,25 @@ export const fixtures = {
     first_name: 'Ada',
     last_name: 'Admin',
     photo_url: null,
+    active_player_profile_id: null,
+    active_trainer_id: null,
+    context_count: 0,
+    is_child_account: false,
+    portal_branding: DEFAULT_BRANDING,
   } satisfies CurrentUser,
+
+  emptyContexts: {
+    active_player_profile_id: null,
+    active_trainer_id: null,
+    contexts: [],
+  } satisfies TrainingContextList,
+
+  emptyApprovals: {
+    items: [],
+    page: 1,
+    page_size: 25,
+    total: 0,
+  } satisfies ApprovalRequestPage,
 
   trainerProfile: {
     id: 'user-trainer-1',
@@ -78,6 +100,21 @@ export const handlers = [
   http.post(`${BASE}/auth/logout`, () => new HttpResponse(null, { status: 204 })),
 
   http.get(`${BASE}/me/profile`, () => HttpResponse.json(fixtures.trainerProfile)),
+
+  // Extension (2026-08-27, family accounts) — replaces the old
+  // `/me/trainers` and `/me/trainer-context` handlers (research.md
+  // R-49). A test that needs a non-empty switcher overrides these with
+  // `server.use(...)`, as every ctx-scoped test already does.
+  http.get(`${BASE}/me/contexts`, () => HttpResponse.json(fixtures.emptyContexts)),
+
+  http.put(`${BASE}/me/context`, () => HttpResponse.json(fixtures.emptyContexts)),
+
+  // Extension (2026-08-27) — US12: the nav frame's pending-count badge
+  // reads this for every parent-shaped session, so a default handler
+  // keeps every test that doesn't care about approvals quiet; a test
+  // that does overrides it with `server.use(...)`.
+  http.get(`${BASE}/me/approvals`, () => HttpResponse.json(fixtures.emptyApprovals)),
+  http.get(`${BASE}/me/requests`, () => HttpResponse.json(fixtures.emptyApprovals)),
 
   http.get(`${BASE}/admin/users`, () =>
     HttpResponse.json({

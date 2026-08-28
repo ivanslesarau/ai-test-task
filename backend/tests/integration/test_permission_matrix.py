@@ -42,7 +42,19 @@ class RestrictedRoute:
         self.json_body = json_body
 
     def path(self, **kwargs: str) -> str:
-        return self.path_template.format(**kwargs)
+        class _DefaultToNonexistent(dict):
+            """Any path placeholder this route needs that the caller did
+            not explicitly supply — e.g. `{profile_id}`, `{association_id}`
+            — resolves to a harmless placeholder value, the same one
+            `{user_id}` has always used. Keeps this table's per-route
+            entries free of boilerplate kwargs the role gate never reads
+            (extension 2026-08-27: family accounts add path parameters
+            other than `user_id` for the first time)."""
+
+            def __missing__(self, key: str) -> str:
+                return "nonexistent"
+
+        return self.path_template.format_map(_DefaultToNonexistent(kwargs))
 
 
 # US3's /me/profile and /media/photos are role-agnostic (every signed-in
@@ -92,13 +104,14 @@ RESTRICTED_ROUTES: list[RestrictedRoute] = [
     RestrictedRoute("GET", "/me/share-link", {UserRole.TRAINER}),
     RestrictedRoute("POST", "/me/share-link/regenerate", {UserRole.TRAINER}),
     RestrictedRoute("GET", "/trainer/players", {UserRole.TRAINER}),
-    # Extension — US7: multi-trainer context is Player/Parent-only.
-    RestrictedRoute("GET", "/me/trainers", {UserRole.PLAYER_PARENT}),
+    # Extension — US7/family accounts: profile-and-trainer context is
+    # Player/Parent-only.
+    RestrictedRoute("GET", "/me/contexts", {UserRole.PLAYER_PARENT}),
     RestrictedRoute(
         "PUT",
-        "/me/trainer-context",
+        "/me/context",
         {UserRole.PLAYER_PARENT},
-        json_body={"trainer_id": "nonexistent"},
+        json_body={"player_profile_id": "nonexistent", "trainer_id": "nonexistent"},
     ),
     # Extension — US8: portal branding is Trainer-only. The two
     # multipart logo endpoints (PUT/DELETE /me/branding/logo) aren't
@@ -109,6 +122,79 @@ RESTRICTED_ROUTES: list[RestrictedRoute] = [
         "PATCH", "/me/branding", {UserRole.TRAINER}, json_body={"primary_color": "#3366cc"}
     ),
     RestrictedRoute("POST", "/me/branding/reset", {UserRole.TRAINER}),
+    # Extension (2026-08-27) — US9/US10: a family's own player profiles and
+    # their trainers are Player/Parent-only at the role gate. Whether a
+    # *child's own* sign-in may reach these (FR-132) is a business rule
+    # FamilyService enforces, not a role, so it is proven in
+    # test_family_profiles.py / test_family_trainers.py instead — this
+    # table only proves the other three roles are refused.
+    RestrictedRoute("GET", "/me/players", {UserRole.PLAYER_PARENT}),
+    RestrictedRoute(
+        "POST",
+        "/me/players",
+        {UserRole.PLAYER_PARENT},
+        json_body={
+            "first_name": "Probe",
+            "last_name": "Child",
+            "date_of_birth": "2015-01-01",
+            "gender": "male",
+        },
+    ),
+    RestrictedRoute("GET", "/me/players/{profile_id}", {UserRole.PLAYER_PARENT}),
+    RestrictedRoute(
+        "PATCH",
+        "/me/players/{profile_id}",
+        {UserRole.PLAYER_PARENT},
+        json_body={"school": "Matrix Probe School"},
+    ),
+    RestrictedRoute("DELETE", "/me/players/{profile_id}", {UserRole.PLAYER_PARENT}),
+    RestrictedRoute(
+        "POST",
+        "/me/players/{profile_id}/trainers",
+        {UserRole.PLAYER_PARENT},
+        json_body={"trainer_id": "nonexistent"},
+    ),
+    RestrictedRoute(
+        "DELETE", "/me/players/{profile_id}/trainers/{association_id}", {UserRole.PLAYER_PARENT}
+    ),
+    # Extension (2026-08-27) — US11: a child's own sign-in is Player/Parent
+    # -only at the role gate; whether the *caller* may reach it (RequireParentDep,
+    # T373) is a business rule proven in test_child_permissions.py, not here.
+    RestrictedRoute(
+        "PUT",
+        "/me/players/{profile_id}/sign-in",
+        {UserRole.PLAYER_PARENT},
+        json_body={"email": "matrix-child-signin-probe@example.org"},
+    ),
+    RestrictedRoute("DELETE", "/me/players/{profile_id}/sign-in", {UserRole.PLAYER_PARENT}),
+    # Extension (2026-08-27) — US12: the Pending Parent Approval workflow
+    # is Player/Parent-only at the role gate, on both sides — a parent's
+    # decision queue (`RequireParentDep`) and a child's own raised
+    # requests (`PlayerParentOnlyDep`, since a signed-in child is an
+    # ordinary player_parent account, research.md R-38). Whether a
+    # *specific caller* may reach a *specific* request, and whether a
+    # signed-in child is refused the parent-only half despite sharing its
+    # role, are business rules proven in test_approval_workflow.py and
+    # test_child_permissions_approvals below — this table only proves the
+    # other three roles are refused.
+    RestrictedRoute("GET", "/me/approvals", {UserRole.PLAYER_PARENT}),
+    RestrictedRoute("GET", "/me/approvals/{request_id}", {UserRole.PLAYER_PARENT}),
+    RestrictedRoute("POST", "/me/approvals/{request_id}/approve", {UserRole.PLAYER_PARENT}),
+    RestrictedRoute("POST", "/me/approvals/{request_id}/deny", {UserRole.PLAYER_PARENT}),
+    RestrictedRoute(
+        "POST",
+        "/me/approvals/{request_id}/request-info",
+        {UserRole.PLAYER_PARENT},
+        json_body={"note": "matrix probe"},
+    ),
+    RestrictedRoute("GET", "/me/requests", {UserRole.PLAYER_PARENT}),
+    RestrictedRoute("POST", "/me/requests/{request_id}/withdraw", {UserRole.PLAYER_PARENT}),
+    RestrictedRoute(
+        "POST",
+        "/me/requests/{request_id}/respond",
+        {UserRole.PLAYER_PARENT},
+        json_body={"note": "matrix probe"},
+    ),
 ]
 
 
@@ -180,6 +266,76 @@ async def test_role_outside_allow_list_is_refused(
     assert response.json()["error"]["code"] == "forbidden"
 
 
+# Extension (2026-08-27) — US12: the parent-only half of the approvals
+# workflow refuses a signed-in child despite sharing the player_parent
+# role (RequireParentDep, research.md R-38) — a fifth caller shape none
+# of RESTRICTED_ROUTES's four-role sweep exercises. The child-only half
+# (`/me/requests/*`) must stay reachable, which is the asymmetry this
+# test proves alongside the refusal.
+_PARENT_ONLY_APPROVAL_ROUTES: list[RestrictedRoute] = [
+    r for r in RESTRICTED_ROUTES if r.path_template.startswith("/me/approvals")
+]
+_CHILD_REACHABLE_REQUEST_ROUTES: list[RestrictedRoute] = [
+    r for r in RESTRICTED_ROUTES if r.path_template.startswith("/me/requests")
+]
+
+
+@pytest.mark.parametrize(
+    "restricted_route", _PARENT_ONLY_APPROVAL_ROUTES, ids=lambda r: r.path_template
+)
+async def test_a_signed_in_child_is_refused_the_parent_only_approval_routes(
+    app_client: AsyncClient,
+    db_session: AsyncSession,
+    restricted_route: RestrictedRoute,
+) -> None:
+    from tests.helpers import create_family
+    from tests.helpers import create_session_cookie as _create_session_cookie
+
+    _parent, _profiles, child_accounts = await create_family(
+        db_session, children=1, with_sign_in=True
+    )
+    await db_session.commit()
+    token = await _create_session_cookie(db_session, child_accounts[0])
+    await db_session.commit()
+    app_client.cookies.set("pp_session", token)
+
+    method: Callable[..., Awaitable] = getattr(app_client, restricted_route.method.lower())
+    kwargs = {"json": restricted_route.json_body} if restricted_route.json_body else {}
+    response = await method(restricted_route.path(request_id="nonexistent"), **kwargs)
+
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "restricted_route", _CHILD_REACHABLE_REQUEST_ROUTES, ids=lambda r: r.path_template
+)
+async def test_a_signed_in_child_can_reach_their_own_requests_routes(
+    app_client: AsyncClient,
+    db_session: AsyncSession,
+    restricted_route: RestrictedRoute,
+) -> None:
+    """Not 403 — a child raises requests through this same role, and the
+    role gate alone (`PlayerParentOnlyDep`) must not turn them away. A
+    404 for a nonexistent request id is the expected shape here; only a
+    403 would mean the role gate wrongly caught a child."""
+    from tests.helpers import create_family
+    from tests.helpers import create_session_cookie as _create_session_cookie
+
+    _parent, _profiles, child_accounts = await create_family(
+        db_session, children=1, with_sign_in=True
+    )
+    await db_session.commit()
+    token = await _create_session_cookie(db_session, child_accounts[0])
+    await db_session.commit()
+    app_client.cookies.set("pp_session", token)
+
+    method: Callable[..., Awaitable] = getattr(app_client, restricted_route.method.lower())
+    kwargs = {"json": restricted_route.json_body} if restricted_route.json_body else {}
+    response = await method(restricted_route.path(request_id="nonexistent"), **kwargs)
+
+    assert response.status_code != 403
+
+
 def test_every_admin_route_is_present_in_the_matrix() -> None:
     """Discovers routes from the app's own generated OpenAPI schema
     rather than trusting the hand-maintained RESTRICTED_ROUTES list to
@@ -225,6 +381,12 @@ _MULTIPART_ROUTES = {("PUT", "/me/branding/logo"), ("DELETE", "/me/branding/logo
 # /me/profile/photo is likewise multipart (PUT) and role-agnostic (every
 # role); DELETE has no body and needs no json_body entry either way.
 _MULTIPART_ROUTES |= {("PUT", "/me/profile/photo"), ("DELETE", "/me/profile/photo")}
+
+# Extension (2026-08-27) — a player profile's photo is multipart too, and
+# not expressible through RestrictedRoute's json_body shape; the role gate
+# is proven by test_family_photo-shaped assertions in
+# test_family_profiles.py instead.
+_MULTIPART_ROUTES |= {("PUT", "/me/players/{profile_id}/photo")}
 
 
 def test_every_me_and_trainer_route_is_present_in_the_matrix_or_accounted_for() -> None:

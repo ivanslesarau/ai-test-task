@@ -8,27 +8,38 @@ from app.db.base import Base, new_uuid, utcnow
 
 class TrainerPlayerAssociation(Base):
     """The many-to-many at the centre of multi-trainer support
-    (data-model.md §17, FR-084 – FR-092).
+    (data-model.md §17, §29.1, FR-084 – FR-092, FR-114).
 
-    The unique constraint on (trainer_user_id, player_user_id) is what
-    makes FR-082 true rather than merely checked: a second join attempt
-    hits this index, and the service catches the conflict rather than
-    raising the link's use count a second time.
+    The unique constraint is what makes FR-082 true rather than merely
+    checked: a second join attempt hits this index, and the service catches
+    the conflict rather than raising the link's use count a second time.
+    The same is now true at profile granularity for FR-127's re-add case.
+
+    **Migration complete (revisions 0008 – 0010).** FR-114 moved this
+    association's subject from the *account* to the *player profile*:
+    `player_profile_id` is required, `uq_trainer_player` is on
+    `(trainer_user_id, player_profile_id)`, and `player_user_id` no longer
+    exists — every association joins on the profile, not the account
+    (research.md R-35, data-model.md §29.1).
     """
 
     __tablename__ = "trainer_player_associations"
     __table_args__ = (
-        UniqueConstraint("trainer_user_id", "player_user_id", name="uq_trainer_player"),
-        Index("ix_tpa_player_status", "player_user_id", "status"),
+        UniqueConstraint("trainer_user_id", "player_profile_id", name="uq_trainer_player"),
+        Index("ix_tpa_player_status", "player_profile_id", "status"),
         Index("ix_tpa_trainer_status", "trainer_user_id", "status"),
+        Index("ix_tpa_profile_status", "player_profile_id", "status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     trainer_user_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    player_user_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    player_profile_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("player_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     share_link_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("share_links.id"), nullable=True

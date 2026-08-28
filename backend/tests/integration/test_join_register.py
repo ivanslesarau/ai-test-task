@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.association import TrainerPlayerAssociation
-from app.models.role_details import PlayerDetail
+from app.models.player_profile import ActiveTrainingContext, PlayerProfile
 from app.models.user import User
 from tests.helpers import create_trainer_with_link
 
@@ -48,7 +48,7 @@ async def test_happy_path_creates_account_profile_detail_association_and_session
     assert "pp_session" in response.cookies
     body = response.json()
     assert body["trainer_display_name"] == "Acme Academy"
-    assert body["already_associated"] is False
+    assert body["already_associated_profile_ids"] == []
     assert body["active_trainer_id"] == trainer.id
 
     result = await db_session.execute(select(User).where(User.email == "happy-path@example.org"))
@@ -56,15 +56,24 @@ async def test_happy_path_creates_account_profile_detail_association_and_session
     assert user.role == "player_parent"
     assert user.status == "active"
 
-    detail_result = await db_session.execute(
-        select(PlayerDetail).where(PlayerDetail.user_id == user.id)
+    profile_result = await db_session.execute(
+        select(PlayerProfile).where(PlayerProfile.account_user_id == user.id)
     )
-    detail = detail_result.scalar_one()
-    assert detail.is_self is True
-    assert detail.active_trainer_user_id == trainer.id
+    profile = profile_result.scalar_one()
+    assert profile.kind == "self"
+    assert profile.first_name is None and profile.last_name is None
+
+    context_result = await db_session.execute(
+        select(ActiveTrainingContext).where(ActiveTrainingContext.user_id == user.id)
+    )
+    context = context_result.scalar_one()
+    assert context.player_profile_id == profile.id
+    assert context.trainer_user_id == trainer.id
 
     assoc_result = await db_session.execute(
-        select(TrainerPlayerAssociation).where(TrainerPlayerAssociation.player_user_id == user.id)
+        select(TrainerPlayerAssociation).where(
+            TrainerPlayerAssociation.player_profile_id == profile.id
+        )
     )
     association = assoc_result.scalar_one()
     assert association.trainer_user_id == trainer.id
@@ -96,12 +105,13 @@ async def test_a_dependant_registration_stores_player_name_and_dob(
         select(User).where(User.email == "parent-of-child@example.org")
     )
     user = result.scalar_one()
-    detail_result = await db_session.execute(
-        select(PlayerDetail).where(PlayerDetail.user_id == user.id)
+    profile_result = await db_session.execute(
+        select(PlayerProfile).where(PlayerProfile.account_user_id == user.id)
     )
-    detail = detail_result.scalar_one()
-    assert detail.is_self is False
-    assert detail.player_name == "Sam Lee"
+    profile = profile_result.scalar_one()
+    assert profile.kind == "child"
+    assert profile.first_name == "Sam"
+    assert profile.last_name == "Lee"
 
 
 async def test_duplicate_email_is_refused_and_nothing_is_left_behind(

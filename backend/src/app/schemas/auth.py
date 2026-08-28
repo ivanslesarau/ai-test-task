@@ -22,9 +22,14 @@ class CurrentUser(BaseModel):
     first_name: str
     last_name: str
     photo_url: str | None
-    # Extension (2026-08-26): multi-trainer context and branding.
+    # Extension (2026-08-27, family accounts, contract v1.2.0): the pair
+    # is now a profile and a trainer together (FR-117), `trainer_count`
+    # becomes `context_count` (research.md R-49), and `is_child_account`
+    # is derived (research.md R-38).
+    active_player_profile_id: str | None
     active_trainer_id: str | None
-    trainer_count: int
+    context_count: int
+    is_child_account: bool
     portal_branding: PortalBranding
 
 

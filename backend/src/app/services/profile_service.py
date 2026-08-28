@@ -10,8 +10,9 @@ from app.core.errors import (
 from app.core.phone import normalize_phone
 from app.db.base import new_uuid, utcnow
 from app.models.enums import AccountStatus, UserRole
-from app.models.role_details import CoachDetail, TrainerOrganization
+from app.models.role_details import CoachDetail, ParentContact, TrainerOrganization
 from app.models.user import User
+from app.repositories.player_profile_repository import PlayerProfileRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.profile import OwnProfile, PhotoUrls
 from app.schemas.role_detail import build_role_detail_out
@@ -34,10 +35,13 @@ _ROLE_EDITABLE: dict[UserRole, frozenset[str]] = {
     UserRole.SUPER_ADMIN: frozenset(),
     UserRole.TRAINER: frozenset({"business_name", "address", "website", "description"}),
     UserRole.COACH: frozenset({"bio", "credentials", "certifications", "is_publicly_visible"}),
+    # `school` and `jersey_number` left the account's role detail — they
+    # describe one player, and an account now holds several (data-model.md
+    # §35, research.md R-34). They are edited per-profile through
+    # `/me/players/{profile_id}`, not here. Only the family's one contact
+    # record remains an account-level field.
     UserRole.PLAYER_PARENT: frozenset(
         {
-            "school",
-            "jersey_number",
             "emergency_contact_name",
             "emergency_contact_phone",
             "emergency_contact_relation",
@@ -60,11 +64,19 @@ class ProfileService:
         self._settings = settings
         self._photo_storage = photo_storage
         self._users = UserRepository(db_session)
+        self._profiles = PlayerProfileRepository(db_session)
 
     async def get_own_profile(self, user: User) -> OwnProfile:
         profile = await self._users.get_profile(user.id)
         assert profile is not None
-        role_detail = build_role_detail_out(await self._users.get_role_detail(user))
+        profile_count = (
+            len(await self._profiles.list_live_for_account(user.id))
+            if user.role_enum is UserRole.PLAYER_PARENT
+            else 0
+        )
+        role_detail = build_role_detail_out(
+            await self._users.get_role_detail(user), profile_count=profile_count
+        )
         return OwnProfile(
             id=user.id,
             email=user.email,
@@ -125,19 +137,17 @@ class ProfileService:
             for field in ("bio", "credentials", "certifications", "is_publicly_visible"):
                 if field in updates:
                     setattr(detail, field, updates[field])
-        elif role is UserRole.PLAYER_PARENT and isinstance(detail, tuple):
-            player, parent = detail
-            for field in ("school", "jersey_number"):
+        elif role is UserRole.PLAYER_PARENT and isinstance(detail, ParentContact):
+            # `school`/`jersey_number` no longer route through here — they
+            # are per-profile now and rejected by `editable_fields_for`
+            # before this method is ever reached (data-model.md §35).
+            for field in (
+                "emergency_contact_name",
+                "emergency_contact_phone",
+                "emergency_contact_relation",
+            ):
                 if field in updates:
-                    setattr(player, field, updates[field])
-            if parent is not None:
-                for field in (
-                    "emergency_contact_name",
-                    "emergency_contact_phone",
-                    "emergency_contact_relation",
-                ):
-                    if field in updates:
-                        setattr(parent, field, updates[field])
+                    setattr(detail, field, updates[field])
 
     async def upload_own_photo(self, user: User, data: bytes) -> PhotoUrls:
         if len(data) > self._settings.max_upload_bytes:

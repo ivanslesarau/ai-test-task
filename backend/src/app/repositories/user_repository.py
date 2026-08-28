@@ -7,11 +7,19 @@ from sqlalchemy.orm import selectinload
 
 from app.core.errors import StaleVersion
 from app.db.base import new_uuid, utcnow
-from app.models.enums import AccountStatus, UserRole
-from app.models.role_details import CoachDetail, ParentContact, PlayerDetail, TrainerOrganization
+from app.models.enums import AccountStatus, PlayerProfileKind, UserRole
+from app.models.player_profile import ActiveTrainingContext, PlayerProfile
+from app.models.role_details import CoachDetail, ParentContact, TrainerOrganization
 from app.models.user import User, UserProfile
 
-RoleDetailRow = TrainerOrganization | CoachDetail | tuple[PlayerDetail, ParentContact | None] | None
+# `player_details` is dropped (data-model.md §29.2, §35). For a
+# player_parent account the role detail is now the family's single
+# contact record alone — the player fields it used to carry moved to
+# `player_profiles`, which has its own repository (research.md R-34).
+# `ParentContact` is created for every player_parent account regardless
+# of role detail presence, so `None` here is defensive rather than
+# expected in practice.
+RoleDetailRow = TrainerOrganization | CoachDetail | ParentContact | None
 
 _SORT_COLUMNS = {
     "created_at_desc": User.created_at.desc(),
@@ -21,13 +29,31 @@ _SORT_COLUMNS = {
 }
 
 
+def _split_join_player_name(player_name: str | None) -> tuple[str, str]:
+    """Splits a CHILD registration's single `player_name` field into the
+    two columns `ck_player_profiles_self_names` requires, on the last
+    space — the same heuristic revision 0009's data migration uses, so a
+    new child registered today and a historical one migrated yesterday
+    are named the same way. A one-word name becomes the first name with
+    `'—'` as the last (data-model.md §33). `JoinRegistrationRequest`
+    already guarantees `player_name` is non-null when `is_self` is
+    false."""
+    name = (player_name or "").strip()
+    if not name:
+        return ("—", "—")
+    if " " not in name:
+        return (name, "—")
+    first, _, last = name.rpartition(" ")
+    return (first.strip() or "—", last.strip() or "—")
+
+
 @dataclass
 class NewAccountInput:
     role: UserRole
     email: str
     first_name: str
     last_name: str
-    phone: str
+    phone: str | None = None
     business_name: str | None = None
 
 
@@ -134,23 +160,37 @@ class UserRepository:
         elif data.role is UserRole.COACH:
             self._session.add(CoachDetail(user_id=user.id, is_publicly_visible=False))
         elif data.role is UserRole.PLAYER_PARENT:
-            self._session.add(PlayerDetail(user_id=user.id))
+            # No player_profiles row is created here (data-model.md §35,
+            # R-34's contract note): a Super Admin creates the *account*,
+            # and `profile_count` of zero is explicitly valid for one — a
+            # player is added afterwards through `/me/players` by the
+            # family itself (FR-107). Only the family's one contact
+            # record is unconditional.
             self._session.add(ParentContact(user_id=user.id))
 
         await self._session.flush()
         return user
 
-    async def insert_join_registration(self, data: NewJoinRegistrationInput) -> User:
-        """Creates the account, profile, player detail, and an empty
-        parent-contact row for a registration through a ShareLink
-        (extension 2026-08-26, FR-074). Mirrors insert_account's shape
-        for the Player/Parent branch, with the extension's five
-        player_details columns set from the registration form.
+    async def insert_join_registration(
+        self, data: NewJoinRegistrationInput
+    ) -> tuple[User, PlayerProfile]:
+        """Creates the account, profile, player profile, active training
+        context, and an empty parent-contact row for a registration
+        through a ShareLink (extension 2026-08-26, FR-074; family
+        accounts, data-model.md §35).
+
+        `kind` follows `is_self` (data-model.md §26): a SELF profile
+        carries no name or photo of its own (R-37), a CHILD profile's
+        name is split from `player_name`. The context this join produces
+        is written directly to `active_training_contexts`, replacing
+        `player_details.active_trainer_user_id` — this is the one write
+        path FR-120's "exactly one pair" starts from.
 
         Added to the session but not flushed to commit — the caller
         (JoinService) creates the association and session in the same
         transaction, so a failure anywhere leaves nothing behind
-        (FR-083)."""
+        (FR-083). Returns the account and the profile just created, since
+        the caller needs the profile's id to create the association."""
         now = utcnow()
         user = User(
             id=new_uuid(),
@@ -174,20 +214,45 @@ class UserRepository:
                 updated_at=now,
             )
         )
+
+        if data.is_self:
+            profile_first_name, profile_last_name = None, None
+        else:
+            profile_first_name, profile_last_name = _split_join_player_name(data.player_name)
+
+        profile = PlayerProfile(
+            id=new_uuid(),
+            account_user_id=user.id,
+            kind=(PlayerProfileKind.SELF if data.is_self else PlayerProfileKind.CHILD).value,
+            first_name=profile_first_name,
+            last_name=profile_last_name,
+            photo_key=None,
+            date_of_birth=data.date_of_birth,
+            gender=data.gender,
+            school=None,
+            jersey_number=None,
+            skill_level=None,
+            tokens_without_approval=False,
+            sign_in_user_id=None,
+            removed_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._session.add(profile)
+        await self._session.flush()
+
         self._session.add(
-            PlayerDetail(
+            ActiveTrainingContext(
                 user_id=user.id,
-                player_name=data.player_name,
-                date_of_birth=data.date_of_birth,
-                gender=data.gender,
-                is_self=data.is_self,
-                active_trainer_user_id=data.active_trainer_user_id,
+                player_profile_id=profile.id,
+                trainer_user_id=data.active_trainer_user_id,
+                updated_at=now,
             )
         )
         self._session.add(ParentContact(user_id=user.id))
 
         await self._session.flush()
-        return user
+        return user, profile
 
     async def get_role_detail(self, user: User) -> RoleDetailRow:
         role = user.role_enum
@@ -196,9 +261,7 @@ class UserRepository:
         if role is UserRole.COACH:
             return await self._session.get(CoachDetail, user.id)
         if role is UserRole.PLAYER_PARENT:
-            player = await self._session.get(PlayerDetail, user.id)
-            parent = await self._session.get(ParentContact, user.id)
-            return (player, parent) if player is not None else None
+            return await self._session.get(ParentContact, user.id)
         return None
 
     async def list_directory(

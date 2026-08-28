@@ -9,13 +9,30 @@ export class ApiError extends Error {
   readonly status: number
   readonly code: string
   readonly fields: FieldError[]
+  /**
+   * The full parsed `error` envelope, for the handful of responses that
+   * carry structured data beyond `code`/`message`/`fields` — e.g.
+   * `DuplicateProfileError.error.matches` on `POST /me/players`'s 409
+   * (contracts/openapi.yaml, research.md R-45). Kept as `unknown` here so
+   * this shared module stays free of any one feature's domain types
+   * (constitution Principle IV); a caller narrows it with its own type
+   * guard, the same way `isApiError` narrows this class.
+   */
+  readonly raw: Record<string, unknown>
 
-  constructor(status: number, code: string, message: string, fields: FieldError[] = []) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    fields: FieldError[] = [],
+    raw: Record<string, unknown> = {},
+  ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.fields = fields
+    this.raw = raw
   }
 
   fieldMessage(field: string): string | undefined {
@@ -55,7 +72,13 @@ export function toApiError(error: unknown): ApiError {
     const status = error.response?.status ?? 0
     const data: unknown = error.response?.data
     if (isErrorEnvelope(data)) {
-      return new ApiError(status, data.error.code, data.error.message, data.error.fields ?? [])
+      return new ApiError(
+        status,
+        data.error.code,
+        data.error.message,
+        data.error.fields ?? [],
+        data.error as Record<string, unknown>,
+      )
     }
     return new ApiError(status, 'network_error', error.message)
   }

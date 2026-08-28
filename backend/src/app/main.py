@@ -7,7 +7,9 @@ from fastapi.responses import JSONResponse
 
 from app.api.v1 import (
     admin_users_router,
+    approvals_router,
     auth_router,
+    family_router,
     join_router,
     me_router,
     media_router,
@@ -17,15 +19,23 @@ from app.core.config import get_settings
 from app.core.errors import (
     AccountNotActive,
     ActionNotPermitted,
+    ApprovalAmountChanged,
+    ApprovalKindNotExecutable,
+    ApprovalSubjectUnavailable,
+    ChildMustAskParent,
     Conflict,
     InvalidCredentials,
     InvitationLinkInvalid,
     InvitationNotUsable,
     NotAuthenticated,
     NotFound,
+    ParentOnlyField,
     PayloadTooLarge,
     PermissionDenied,
+    PlayerProfileNotFound,
+    PossibleDuplicateProfile,
     RateLimited,
+    RequestAlreadyResolved,
     RoleCannotJoin,
     StaleVersion,
     UnsupportedMediaType,
@@ -132,6 +142,56 @@ def create_app() -> FastAPI:
     async def _role_cannot_join(_: Request, exc: RoleCannotJoin) -> JSONResponse:
         return JSONResponse(status_code=403, content=_error("role_cannot_join", exc.message))
 
+    # --- Extension (2026-08-27): family accounts, child sign-in, approvals -
+
+    @app.exception_handler(PlayerProfileNotFound)
+    async def _player_profile_not_found(_: Request, exc: PlayerProfileNotFound) -> JSONResponse:
+        return JSONResponse(
+            status_code=404, content=_error("player_profile_not_found", exc.message)
+        )
+
+    @app.exception_handler(PossibleDuplicateProfile)
+    async def _possible_duplicate_profile(
+        _: Request, exc: PossibleDuplicateProfile
+    ) -> JSONResponse:
+        body = _error("possible_duplicate_profile", exc.message)
+        body["error"]["matches"] = exc.matches
+        return JSONResponse(status_code=409, content=body)
+
+    @app.exception_handler(ParentOnlyField)
+    async def _parent_only_field(_: Request, exc: ParentOnlyField) -> JSONResponse:
+        return JSONResponse(status_code=403, content=_error("parent_only_field", exc.message))
+
+    @app.exception_handler(ChildMustAskParent)
+    async def _child_must_ask_parent(_: Request, exc: ChildMustAskParent) -> JSONResponse:
+        return JSONResponse(status_code=403, content=_error("child_must_ask_parent", exc.message))
+
+    @app.exception_handler(RequestAlreadyResolved)
+    async def _request_already_resolved(_: Request, exc: RequestAlreadyResolved) -> JSONResponse:
+        return JSONResponse(
+            status_code=409, content=_error("request_already_resolved", exc.message)
+        )
+
+    @app.exception_handler(ApprovalSubjectUnavailable)
+    async def _approval_subject_unavailable(
+        _: Request, exc: ApprovalSubjectUnavailable
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422, content=_error("approval_subject_unavailable", exc.message)
+        )
+
+    @app.exception_handler(ApprovalKindNotExecutable)
+    async def _approval_kind_not_executable(
+        _: Request, exc: ApprovalKindNotExecutable
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422, content=_error("approval_kind_not_executable", exc.message)
+        )
+
+    @app.exception_handler(ApprovalAmountChanged)
+    async def _approval_amount_changed(_: Request, exc: ApprovalAmountChanged) -> JSONResponse:
+        return JSONResponse(status_code=422, content=_error("approval_amount_changed", exc.message))
+
     @app.exception_handler(RequestValidationError)
     async def _request_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
         """Pydantic-level request parsing errors (malformed email, missing
@@ -173,6 +233,8 @@ def create_app() -> FastAPI:
     app.include_router(media_router.router, prefix="/api/v1")
     app.include_router(join_router.router, prefix="/api/v1")
     app.include_router(trainer_router.router, prefix="/api/v1")
+    app.include_router(family_router.router, prefix="/api/v1")
+    app.include_router(approvals_router.router, prefix="/api/v1")
 
     return app
 

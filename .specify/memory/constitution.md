@@ -1,31 +1,25 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: 1.0.0 -> 1.1.0
-Bump rationale: MINOR. A new principle (VI. Null-Not-Empty Data Contract) was added and the
-  Technology Stack & Constraints section was materially expanded to record the ratified initial
-  stack with concrete version floors and tooling. No existing principle was removed or redefined,
-  so nothing previously compliant becomes violating by redefinition.
+Version change: 1.1.0 -> 1.1.1
+Bump rationale: PATCH. Corrects a stale statement of fact — the sync-impact report's
+  TODO(NULL_NORMALIZATION_HELPER) said the frontend had no shared empty-string-to-null helper. It
+  has had one since D-01: `frontend/src/shared/lib/normalize-payload.ts`, the single normalizer
+  every TanStack Form submit handler routes through, covered by
+  `frontend/tests/shared/normalize-payload.test.ts`. The bug-fix slice recorded this as discharged
+  in its own tasks.md, but the constitution's own text was never updated — leaving the TODO in
+  place taught the next reader that Principle VI was unimplemented when it is not. No principle,
+  obligation, or section changed; only this correction.
 
-Modified principles:
-  - II. End-to-End Type Safety - boundary-parity bullet now cross-references Principle VI for
-    optionality. No principle renamed or removed.
+Modified principles: none.
 
-Added sections:
-  - VI. Null-Not-Empty Data Contract (NON-NEGOTIABLE) - empty-string-to-null normalization before
-    submit on the frontend, explicit `str | None` Pydantic schemas, and explicit-null-clears-the-
-    column behavior through the service and repository layers.
-  - Technology Stack & Constraints - "ratified initial stack" entries for backend, frontend, and
-    tooling, capturing the as-built dependency set with version floors.
-  - Development Workflow & Quality Gates - two new merge gates covering payload normalization and
-    field-clearing test coverage.
+Added sections: none.
 
-Removed sections: none. Heading hierarchy preserved from the resolved template.
+Removed sections: none.
 
 Follow-up TODOs:
-  - TODO(NULL_NORMALIZATION_HELPER): The frontend has no shared empty-string-to-null helper yet.
-    Principle VI requires exactly one in `shared/lib`; existing TanStack Form submit handlers MUST
-    be migrated onto it. Track as a task in the active feature's tasks.md.
+  - TODO(NULL_NORMALIZATION_HELPER): removed — discharged by D-01;
+    `frontend/src/shared/lib/normalize-payload.ts` is the single normalizer Principle VI requires.
   - TODO(CHART_LIBRARY): Chart.js is designated for dashboard visualizations but is not yet an
     installed dependency, since no dashboard epic has been implemented. Recorded as a pinned
     forward decision, not as as-built state.
@@ -235,4 +229,4 @@ features MUST be resolved either by fixing the code or by amending this constitu
 with this constitution; if the two disagree, this constitution governs and `CLAUDE.md` MUST be
 corrected.
 
-**Version**: 1.1.0 | **Ratified**: 2026-08-19 | **Last Amended**: 2026-08-20
+**Version**: 1.1.1 | **Ratified**: 2026-08-19 | **Last Amended**: 2026-08-28

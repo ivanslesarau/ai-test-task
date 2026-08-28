@@ -2,12 +2,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ActionNotPermitted, NotFound
 from app.db.base import utcnow
-from app.models.enums import AccountStatus, UserRole, is_transition_allowed
-from app.models.role_details import CoachDetail, TrainerOrganization
+from app.models.enums import AccountStatus, PlayerProfileKind, UserRole, is_transition_allowed
+from app.models.role_details import CoachDetail, ParentContact, TrainerOrganization
 from app.models.user import User
+from app.repositories.active_training_context_repository import ActiveTrainingContextRepository
+from app.repositories.approval_repository import ApprovalRepository
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.erasure_repository import ErasureRepository
 from app.repositories.invitation_repository import InvitationRepository
+from app.repositories.player_profile_repository import PlayerProfileRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.share_link_repository import ShareLinkRepository
 from app.repositories.user_repository import UserRepository
@@ -38,6 +41,9 @@ class ErasureService:
         self._erasure = ErasureRepository(db_session)
         self._audit = AuditRepository(db_session)
         self._share_links = ShareLinkRepository(db_session)
+        self._profiles = PlayerProfileRepository(db_session)
+        self._contexts = ActiveTrainingContextRepository(db_session)
+        self._approvals = ApprovalRepository(db_session)
         self._photo_storage = photo_storage
         self._admin_service = admin_service
 
@@ -89,7 +95,7 @@ class ErasureService:
         profile.photo_key = None
         profile.updated_at = utcnow()
 
-        logo_key = await self._anonymize_role_detail(user)
+        logo_key = await self._anonymize_role_detail(user, actor=actor, reason=reason)
 
         if photo_key:
             await self._photo_storage.delete(photo_key)
@@ -101,6 +107,16 @@ class ErasureService:
 
         await self._sessions.revoke_all_for_user(user.id)
         await self._invitations.supersede_outstanding_for_user(user.id)
+
+        if user.role_enum is UserRole.PLAYER_PARENT:
+            # Every signed-in account — the parent and each child sign-in
+            # — holds its own row (data-model.md §27); an erased account
+            # has no context to be in (data-model.md §30).
+            await self._contexts.delete_for_user(user.id)
+            # No one can approve for an erased family (FR-157). A no-op
+            # for a cascaded child erasure, which is never a request's
+            # parent_user_id.
+            await self._approvals.expire_all_live_for_parent(user.id)
 
         await self._erasure.add(
             user_id=user.id,
@@ -119,7 +135,7 @@ class ErasureService:
 
         return await self._admin_service.get_user(user.id)
 
-    async def _anonymize_role_detail(self, user: User) -> str | None:
+    async def _anonymize_role_detail(self, user: User, *, actor: User, reason: str) -> str | None:
         """Returns the trainer's logo key to delete from storage, if any
         (data-model.md §20). Every other side effect happens in place."""
         detail = await self._users.get_role_detail(user)
@@ -151,25 +167,61 @@ class ErasureService:
             detail.credentials = None
             detail.certifications = None
             detail.is_publicly_visible = False
-        elif role is UserRole.PLAYER_PARENT and isinstance(detail, tuple):
-            player, parent = detail
-            player.school = None
-            player.jersey_number = None
-            # player.skill_level and player.gender deliberately survive —
-            # classifications, not identifiers, and reporting
-            # distributions depend on them. is_self is unchanged for the
-            # same reason. player_name and date_of_birth are identifying
-            # and are cleared; active_trainer_user_id is cleared because
-            # an erased account has no context to be in (data-model.md §20).
-            player.player_name = None
-            player.date_of_birth = None
-            player.active_trainer_user_id = None
-            if parent is not None:
-                parent.emergency_contact_name = None
-                parent.emergency_contact_phone = None
-                parent.emergency_contact_relation = None
+        elif role is UserRole.PLAYER_PARENT:
+            if isinstance(detail, ParentContact):
+                detail.emergency_contact_name = None
+                detail.emergency_contact_phone = None
+                detail.emergency_contact_relation = None
+            # The player fields moved off the role detail onto
+            # player_profiles (data-model.md §35) — every profile this
+            # account owns is cleared here instead, extending §10/§20's
+            # transformation to §30's.
+            await self._anonymize_player_profiles(user, actor=actor, reason=reason)
 
         return None
+
+    async def _anonymize_player_profiles(self, user: User, *, actor: User, reason: str) -> None:
+        """data-model.md §30: every `player_profiles` row this account
+        owns — live or already soft-removed, since a removed profile's
+        history is still read on a trainer's roster — loses its
+        identifying data. `skill_level` and `gender` deliberately survive
+        for the same reason §20 gives for the account holder: they are
+        classifications later epics group by, not identifiers.
+
+        Each profile that granted a child a sign-in has that child
+        account erased too, in this same transaction (research.md R-38,
+        R-50) — a child account is personal data about a child, and an
+        erased family must not leave a signed-in child able to act on
+        its behalf."""
+        profiles = await self._profiles.list_all_for_account(user.id)
+        for player_profile in profiles:
+            if player_profile.kind == PlayerProfileKind.CHILD.value:
+                # A child's name is not NULLed — ck_player_profiles_self_names
+                # requires one, and the roster must still read "Deleted
+                # User" (FR-091). A SELF profile's names are already NULL
+                # and stay that way; §10 anonymizes the account's own
+                # user_profiles row instead.
+                player_profile.first_name = "Deleted"
+                player_profile.last_name = "User"
+
+            if player_profile.photo_key:
+                await self._photo_storage.delete(player_profile.photo_key)
+                await self._photo_storage.delete(thumbnail_key_for(player_profile.photo_key))
+            player_profile.photo_key = None
+            player_profile.date_of_birth = None
+            player_profile.school = None
+            player_profile.jersey_number = None
+            player_profile.tokens_without_approval = False
+            player_profile.updated_at = utcnow()
+
+            if player_profile.sign_in_user_id is not None:
+                child_user_id = player_profile.sign_in_user_id
+                player_profile.sign_in_user_id = None
+                child = await self._users.get_by_id(child_user_id)
+                if child is not None and child.status_enum is not AccountStatus.DELETED:
+                    await self.erase(
+                        child.id, actor=actor, expected_version=child.version, reason=reason
+                    )
 
     async def get_erasure_record(self, user_id: str) -> ErasureRecordOut:
         record = await self._erasure.get_for_user(user_id)

@@ -61,11 +61,11 @@ async def test_6_4_through_6_6_full_registration_chain(
 
     # 6.4 — the same client still carries the session cookie the register
     # response set.
-    trainers = await app_client.get("/me/trainers")
-    assert trainers.status_code == 200
-    body = trainers.json()
-    assert len(body["trainers"]) == 1
-    assert body["trainers"][0]["trainer_id"] == trainer.id
+    contexts = await app_client.get("/me/contexts")
+    assert contexts.status_code == 200
+    body = contexts.json()
+    assert len(body["contexts"]) == 1
+    assert body["contexts"][0]["trainer_id"] == trainer.id
     assert body["active_trainer_id"] == trainer.id
 
     # 6.5 — sign in as the trainer and check the roster.

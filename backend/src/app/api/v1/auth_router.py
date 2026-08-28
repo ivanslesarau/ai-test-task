@@ -7,7 +7,7 @@ from app.core.deps import (
     BrandingServiceDep,
     CurrentUserDep,
     SettingsDep,
-    TrainerContextServiceDep,
+    TrainingContextServiceDep,
 )
 from app.models.enums import UserRole
 from app.models.user import User
@@ -18,7 +18,7 @@ from app.schemas.auth import (
     SetupPasswordRequest,
 )
 from app.services.branding_service import BrandingService
-from app.services.trainer_context_service import TrainerContextService
+from app.services.training_context_service import TrainingContextService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -41,19 +41,30 @@ def _set_session_cookie(response: Response, *, token: str, settings: SettingsDep
 
 async def _to_current_user(
     user: User,
-    trainer_context_service: TrainerContextService,
+    training_context_service: TrainingContextService,
     branding_service: BrandingService,
 ) -> CurrentUser:
     photo_url = f"/media/photos/{user.profile.photo_key}" if user.profile.photo_key else None
 
+    active_player_profile_id: str | None = None
     active_trainer_id: str | None = None
-    trainer_count = 0
+    context_count = 0
     if user.role_enum is UserRole.PLAYER_PARENT:
-        # One call resolves-and-repairs the context and lists it
-        # (research.md R-24) — no second query for the count.
-        contexts = await trainer_context_service.list_for_player(user)
+        # One call resolves-and-repairs the pair and lists it
+        # (research.md R-24, R-36) — no second query for the count.
+        contexts = await training_context_service.list_for_account(user)
+        active_player_profile_id = contexts.active_player_profile_id
         active_trainer_id = contexts.active_trainer_id
-        trainer_count = len(contexts.trainers)
+        context_count = len(contexts.contexts)
+
+    # Derived from the existence of a profile naming this account as its
+    # child sign-in, never stored as a column (research.md R-38). Every
+    # role but player_parent resolves False without a query, since no
+    # player_profiles row can name a trainer, coach, or super admin.
+    is_child_account = (
+        user.role_enum is UserRole.PLAYER_PARENT
+        and await training_context_service.is_child_account(user)
+    )
 
     portal_branding = await branding_service.resolve_for_viewer(user)
 
@@ -65,8 +76,10 @@ async def _to_current_user(
         first_name=user.profile.first_name,
         last_name=user.profile.last_name,
         photo_url=photo_url,
+        active_player_profile_id=active_player_profile_id,
         active_trainer_id=active_trainer_id,
-        trainer_count=trainer_count,
+        context_count=context_count,
+        is_child_account=is_child_account,
         portal_branding=portal_branding,
     )
 
@@ -78,14 +91,14 @@ async def login(
     response: Response,
     auth_service: AuthServiceDep,
     settings: SettingsDep,
-    trainer_context_service: TrainerContextServiceDep,
+    training_context_service: TrainingContextServiceDep,
     branding_service: BrandingServiceDep,
 ) -> CurrentUser:
     user, raw_token = await auth_service.sign_in(
         email=body.email, password=body.password, client_ip=_client_ip(request)
     )
     _set_session_cookie(response, token=raw_token, settings=settings)
-    return await _to_current_user(user, trainer_context_service, branding_service)
+    return await _to_current_user(user, training_context_service, branding_service)
 
 
 @router.post("/logout", status_code=204)
@@ -103,10 +116,10 @@ async def logout(
 @router.get("/session", response_model=CurrentUser)
 async def get_session(
     user: CurrentUserDep,
-    trainer_context_service: TrainerContextServiceDep,
+    training_context_service: TrainingContextServiceDep,
     branding_service: BrandingServiceDep,
 ) -> CurrentUser:
-    return await _to_current_user(user, trainer_context_service, branding_service)
+    return await _to_current_user(user, training_context_service, branding_service)
 
 
 @router.get("/setup-password/{token}", response_model=InvitationCheckResponse)

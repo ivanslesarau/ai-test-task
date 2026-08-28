@@ -23,6 +23,10 @@ export type BreadcrumbCrumb =
   | (BaseCrumb & { to: '/admin/users/$userId'; params: { userId: string } })
   | (BaseCrumb & { to: '/trainer/portal' })
   | (BaseCrumb & { to: '/trainer/players' })
+  | (BaseCrumb & { to: '/family' })
+  | (BaseCrumb & { to: '/family/$profileId'; params: { profileId: string } })
+  | (BaseCrumb & { to: '/approvals' })
+  | (BaseCrumb & { to: '/requests' })
 
 /**
  * One label per route that has a page worth naming in the trail. The
@@ -38,6 +42,10 @@ const ROUTE_LABELS: Partial<Record<string, string>> = {
   '/_authed/admin/users/$userId': 'User',
   '/_authed/trainer/portal': 'Portal settings',
   '/_authed/trainer/players': 'Players',
+  '/_authed/family/': 'Family',
+  '/_authed/family/$profileId': 'Player',
+  '/_authed/approvals': 'Approvals',
+  '/_authed/requests': 'Requests',
 }
 
 const HOME_CRUMB = { key: '/_authed/', label: 'Home', to: '/' } as const
@@ -95,6 +103,24 @@ export function useBreadcrumbs(): BreadcrumbCrumb[] {
         break
       case '/_authed/trainer/players':
         pageCrumbs.push({ key: match.routeId, label, to: '/trainer/players', isCurrent })
+        break
+      case '/_authed/family/':
+        pageCrumbs.push({ key: match.routeId, label, to: '/family', isCurrent })
+        break
+      case '/_authed/family/$profileId':
+        pageCrumbs.push({
+          key: match.routeId,
+          label,
+          to: '/family/$profileId',
+          params: match.params as { profileId: string },
+          isCurrent,
+        })
+        break
+      case '/_authed/approvals':
+        pageCrumbs.push({ key: match.routeId, label, to: '/approvals', isCurrent })
+        break
+      case '/_authed/requests':
+        pageCrumbs.push({ key: match.routeId, label, to: '/requests', isCurrent })
         break
       default:
         break

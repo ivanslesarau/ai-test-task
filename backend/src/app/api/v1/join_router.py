@@ -9,7 +9,7 @@ from app.core.deps import (
     ShareLinkServiceDep,
 )
 from app.core.errors import InvitationLinkInvalid
-from app.schemas.join import JoinLinkPreview, JoinRegistrationRequest, JoinResult
+from app.schemas.join import JoinAcceptRequest, JoinLinkPreview, JoinRegistrationRequest, JoinResult
 
 router = APIRouter(prefix="/join", tags=["join"])
 
@@ -88,11 +88,12 @@ async def accept_join_link(
     user: CurrentUserDep,
     join_service: JoinServiceDep,
     share_link_service: ShareLinkServiceDep,
+    body: JoinAcceptRequest | None = None,
 ) -> JoinResult:
     client_ip = _client_ip(request)
     await share_link_service.check_lookup_throttle(client_ip)
     try:
-        result = await join_service.accept(code, current_user=user)
+        result = await join_service.accept(code, current_user=user, body=body)
     except InvitationLinkInvalid:
         await share_link_service.record_lookup_attempt(client_ip=client_ip, successful=False)
         raise

@@ -33,6 +33,10 @@ const ALLOW_LISTED_PATHS = new Set<string>([
   // A directory row action (widgets/user-directory-table), not a nav
   // entry point.
   '/admin/users/$userId',
+  // A family roster row action (widgets/family-roster-list), not a nav
+  // entry point — same shape as '/admin/users/$userId' above (extension
+  // 2026-08-27, tasks.md T364).
+  '/family/$profileId',
 ])
 
 const ALL_ROLES: UserRole[] = ['super_admin', 'trainer', 'coach', 'player_parent']

@@ -80,6 +80,32 @@ function CrumbLink({ crumb }: { crumb: BreadcrumbCrumb }) {
           <Link to="/trainer/players">{crumb.label}</Link>
         </BreadcrumbLink>
       );
+    case "/family":
+      return (
+        <BreadcrumbLink asChild>
+          <Link to="/family">{crumb.label}</Link>
+        </BreadcrumbLink>
+      );
+    case "/family/$profileId":
+      return (
+        <BreadcrumbLink asChild>
+          <Link to="/family/$profileId" params={crumb.params}>
+            {crumb.label}
+          </Link>
+        </BreadcrumbLink>
+      );
+    case "/approvals":
+      return (
+        <BreadcrumbLink asChild>
+          <Link to="/approvals">{crumb.label}</Link>
+        </BreadcrumbLink>
+      );
+    case "/requests":
+      return (
+        <BreadcrumbLink asChild>
+          <Link to="/requests">{crumb.label}</Link>
+        </BreadcrumbLink>
+      );
   }
 }
 

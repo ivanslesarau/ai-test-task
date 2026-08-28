@@ -31,6 +31,12 @@ function NavEntryLink({ item }: { item: NavItem }) {
           {item.label}
         </Link>
       );
+    case "/family":
+      return (
+        <Link to="/family" className="text-primary underline">
+          {item.label}
+        </Link>
+      );
   }
 }
 
@@ -46,18 +52,25 @@ function RoleContent({ user, navItems }: { user: CurrentUser; navItems: NavItem[
       // A player with no association is a valid state (research.md
       // R-24), not an error — a Super Admin-created account, or one
       // whose only trainer was deactivated (FR-089).
-      if (user.trainer_count === 0) {
-        return (
-          <p className="text-muted-foreground">
-            You&apos;re not currently connected to a trainer. Ask them for their invitation
-            link.
-          </p>
-        );
-      }
-      // The active trainer's name, when there is exactly one, is stated
-      // by the shell (widgets/trainer-context-switcher/ui/trainer-context-label.tsx,
-      // fix F7/T307) rather than duplicated here.
-      return <p className="text-muted-foreground">Welcome back.</p>;
+      return (
+        <div className="flex flex-col gap-2">
+          {user.context_count === 0 ? (
+            <p className="text-muted-foreground">
+              You&apos;re not currently connected to a trainer. Ask them for their invitation
+              link.
+            </p>
+          ) : (
+            // The active trainer's name, when there is exactly one, is
+            // stated by the shell (widgets/trainer-context-switcher/ui/
+            // trainer-context-label.tsx, fix F7/T307) rather than
+            // duplicated here.
+            <p className="text-muted-foreground">Welcome back.</p>
+          )}
+          {navItems.map((item) => (
+            <NavEntryLink key={item.key} item={item} />
+          ))}
+        </div>
+      );
     case "trainer":
       // Read from the same descriptor list the header's PrimaryNav reads,
       // so the landing area and the header can never disagree (FR-019,

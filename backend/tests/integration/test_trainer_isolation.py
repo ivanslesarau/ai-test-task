@@ -8,8 +8,15 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.main import app
-from app.models.association import TrainerPlayerAssociation
-from tests.helpers import create_player_with_detail, create_session_cookie, create_trainer_with_link
+from app.models.enums import UserRole
+from tests.helpers import (
+    create_association,
+    create_family,
+    create_player_profile,
+    create_session_cookie,
+    create_trainer_with_link,
+    create_user,
+)
 
 
 def _trainer_facing_get_paths() -> list[str]:
@@ -27,18 +34,10 @@ async def test_no_trainer_facing_response_names_the_other_trainer(
 ) -> None:
     trainer_a, _ = await create_trainer_with_link(db_session, business_name="Trainer A Academy")
     trainer_b, _ = await create_trainer_with_link(db_session, business_name="Trainer B Academy")
-    player = await create_player_with_detail(db_session)
-    db_session.add(
-        TrainerPlayerAssociation(
-            trainer_user_id=trainer_a.id, player_user_id=player.id, status="active"
-        )
-    )
-    db_session.add(
-        TrainerPlayerAssociation(
-            trainer_user_id=trainer_b.id, player_user_id=player.id, status="active"
-        )
-    )
-    await db_session.flush()
+    player = await create_user(db_session, role=UserRole.PLAYER_PARENT)
+    profile = await create_player_profile(db_session, account=player, kind="self")
+    await create_association(db_session, trainer_id=trainer_a.id, player_profile_id=profile.id)
+    await create_association(db_session, trainer_id=trainer_b.id, player_profile_id=profile.id)
 
     token = await create_session_cookie(db_session, trainer_a)
     await db_session.commit()
@@ -59,15 +58,14 @@ async def test_route_table_has_not_grown_an_uncovered_trainer_facing_route() -> 
     _trainer_facing_get_paths(), not be forgotten."""
     known_prefixes = ("/trainer", "/me")
     accounted_for = set(_trainer_facing_get_paths())
-    # /me/profile, /me/trainers, /me/trainer-context, /me/branding* are
-    # either read by every role (profile) or scoped to the *player* side
-    # of context, not the trainer's own roster view — they carry no
+    # /me/profile, /me/contexts, /me/context, /me/branding* are either
+    # read by every role (profile) or scoped to the *player* side of
+    # context, not the trainer's own roster view — they carry no
     # other-trainer identifier for a Trainer caller by construction
-    # (TrainerContextList only ever appears for a Player/Parent caller).
+    # (TrainingContextList only ever appears for a Player/Parent caller).
     known_not_applicable = {
         "/me/profile",
-        "/me/trainers",
-        "/me/trainer-context",
+        "/me/contexts",
         "/me/branding",
         "/me/branding/logo",
         "/me/branding/reset",
@@ -86,3 +84,38 @@ async def test_route_table_has_not_grown_an_uncovered_trainer_facing_route() -> 
             f"New trainer-facing route {path!r} is not covered by the isolation sweep — "
             "add it to _trainer_facing_get_paths() or known_not_applicable with a reason."
         )
+
+
+# --- Extension (2026-08-27) — US11: a family fixture (T383, FR-116, SC-040) -
+
+
+async def test_a_trainer_sees_a_trained_child_and_the_parents_contact_but_not_the_untrained_sibling(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """A trainer with one child on their roster reads that child's own
+    name and the responsible *parent's* contact detail (FR-113, FR-116) —
+    never a sibling on the same account who does not train with them
+    (SC-040), the same guarantee `AssociationRepository.list_for_trainer`
+    already gives at profile granularity (data-model.md §29.1)."""
+    parent, profiles, _ = await create_family(db_session, children=2)
+    trainer, _ = await create_trainer_with_link(db_session, business_name="Family Trainer")
+    trained_child, untrained_sibling = profiles
+    await create_association(db_session, trainer_id=trainer.id, player_profile_id=trained_child.id)
+    token = await create_session_cookie(db_session, trainer)
+    await db_session.commit()
+    app_client.cookies.set("pp_session", token)
+
+    roster = await app_client.get("/trainer/players")
+
+    assert roster.status_code == 200
+    items = roster.json()["items"]
+    assert [i["player_profile_id"] for i in items] == [trained_child.id]
+
+    row = items[0]
+    assert row["display_name"] == f"{trained_child.first_name} {trained_child.last_name}"
+    assert row["responsible_contact"]["email"] == parent.email
+
+    body_text = roster.text
+    assert untrained_sibling.id not in body_text, "the untrained sibling's profile id leaked"
+    assert untrained_sibling.first_name != trained_child.first_name
+    assert untrained_sibling.first_name not in body_text, "the untrained sibling's name leaked"

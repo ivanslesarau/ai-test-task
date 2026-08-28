@@ -18,6 +18,7 @@ from app.models.enums import AccountStatus
 from app.models.user import User
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.invitation_repository import InvitationRepository
+from app.repositories.player_profile_repository import PlayerProfileRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.sign_in_attempt_repository import SignInAttemptRepository
 from app.repositories.user_repository import UserRepository
@@ -45,6 +46,19 @@ class AuthService:
         self._attempts = SignInAttemptRepository(db_session)
         self._audit = AuditRepository(db_session)
         self._invitations = InvitationRepository(db_session)
+        self._profiles = PlayerProfileRepository(db_session)
+
+    async def _child_access_blocked(self, user: User) -> bool:
+        """research.md R-50: a child sign-in's access follows the owning
+        parent's account status, **derived** at authentication time rather
+        than copied onto the child's own row (FR-136). `None` for any
+        account that is not a child sign-in — the common case, checked
+        first via the same `sign_in_user_id` lookup R-38 already uses."""
+        profile = await self._profiles.get_by_sign_in_user_id(user.id)
+        if profile is None:
+            return False
+        parent = await self._users.get_by_id(profile.account_user_id)
+        return parent is None or parent.status_enum is not AccountStatus.ACTIVE
 
     async def sign_in(self, *, email: str, password: str, client_ip: str) -> tuple[User, str]:
         """Returns the authenticated user and the raw session token (the
@@ -75,6 +89,15 @@ class AuthService:
             await self._attempts.record(email=email, client_ip=client_ip, successful=False)
             raise AccountNotActive("Account deactivated. Contact support.")
 
+        # research.md R-50: a child's own account can stay Active while
+        # the parent responsible for them is not — suspension is derived
+        # from the parent's status, never copied onto the child's row, so
+        # this check runs here rather than being a status this account
+        # itself ever carries (FR-136).
+        if await self._child_access_blocked(user):
+            await self._attempts.record(email=email, client_ip=client_ip, successful=False)
+            raise AccountNotActive("Account deactivated. Contact support.")
+
         await self._attempts.record(email=email, client_ip=client_ip, successful=True)
         user.last_login_at = utcnow()
 
@@ -97,6 +120,13 @@ class AuthService:
 
         user = await self._users.get_by_id(record.user_id)
         if user is None or user.status_enum is not AccountStatus.ACTIVE:
+            raise NotAuthenticated("Sign in to continue.")
+
+        # Checked on every request, not only at sign-in, so a parent's
+        # deactivation takes effect for a child's already-open session
+        # too (research.md R-50, FR-136) — the same immediacy FR-012
+        # already gives a directly deactivated account.
+        if await self._child_access_blocked(user):
             raise NotAuthenticated("Sign in to continue.")
 
         await self._sessions.touch(record, idle_days=self._settings.session_idle_days)

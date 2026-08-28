@@ -11,8 +11,14 @@ import time
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.association import TrainerPlayerAssociation
-from tests.helpers import create_player_with_detail, create_session_cookie, create_trainer_with_link
+from app.models.enums import UserRole
+from tests.helpers import (
+    create_association,
+    create_player_profile,
+    create_session_cookie,
+    create_trainer_with_link,
+    create_user,
+)
 
 
 async def test_sc016_accepting_a_second_trainer_completes_well_under_5s(
@@ -20,13 +26,9 @@ async def test_sc016_accepting_a_second_trainer_completes_well_under_5s(
 ) -> None:
     trainer_a, _ = await create_trainer_with_link(db_session)
     trainer_b, link_b = await create_trainer_with_link(db_session)
-    player = await create_player_with_detail(db_session)
-    db_session.add(
-        TrainerPlayerAssociation(
-            trainer_user_id=trainer_a.id, player_user_id=player.id, status="active"
-        )
-    )
-    await db_session.flush()
+    player = await create_user(db_session, role=UserRole.PLAYER_PARENT)
+    profile = await create_player_profile(db_session, account=player, kind="self")
+    await create_association(db_session, trainer_id=trainer_a.id, player_profile_id=profile.id)
     token = await create_session_cookie(db_session, player)
     await db_session.commit()
     app_client.cookies.set("pp_session", token)
@@ -46,24 +48,18 @@ async def test_sc018_switching_context_completes_well_under_2s(
 ) -> None:
     trainer_a, _ = await create_trainer_with_link(db_session)
     trainer_b, _ = await create_trainer_with_link(db_session)
-    player = await create_player_with_detail(db_session)
-    db_session.add(
-        TrainerPlayerAssociation(
-            trainer_user_id=trainer_a.id, player_user_id=player.id, status="active"
-        )
-    )
-    db_session.add(
-        TrainerPlayerAssociation(
-            trainer_user_id=trainer_b.id, player_user_id=player.id, status="active"
-        )
-    )
-    await db_session.flush()
+    player = await create_user(db_session, role=UserRole.PLAYER_PARENT)
+    profile = await create_player_profile(db_session, account=player, kind="self")
+    await create_association(db_session, trainer_id=trainer_a.id, player_profile_id=profile.id)
+    await create_association(db_session, trainer_id=trainer_b.id, player_profile_id=profile.id)
     token = await create_session_cookie(db_session, player)
     await db_session.commit()
     app_client.cookies.set("pp_session", token)
 
     start = time.perf_counter()
-    response = await app_client.put("/me/trainer-context", json={"trainer_id": trainer_b.id})
+    response = await app_client.put(
+        "/me/context", json={"player_profile_id": profile.id, "trainer_id": trainer_b.id}
+    )
     elapsed = time.perf_counter() - start
 
     assert response.status_code == 200

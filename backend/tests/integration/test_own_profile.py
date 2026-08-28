@@ -3,7 +3,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import UserRole
-from app.models.role_details import CoachDetail, ParentContact, PlayerDetail, TrainerOrganization
+from app.models.role_details import CoachDetail, ParentContact, TrainerOrganization
 from tests.helpers import create_session_cookie, create_user
 
 
@@ -14,7 +14,8 @@ async def _sign_in(app_client: AsyncClient, db_session: AsyncSession, role: User
     elif role is UserRole.COACH:
         db_session.add(CoachDetail(user_id=user.id, is_publicly_visible=False))
     elif role is UserRole.PLAYER_PARENT:
-        db_session.add(PlayerDetail(user_id=user.id))
+        # No player_profiles row (data-model.md §35) — the account's role
+        # detail is the family contact record alone; profile_count is 0.
         db_session.add(ParentContact(user_id=user.id))
     await db_session.flush()
 
@@ -126,16 +127,18 @@ async def test_explicit_null_clears_a_nullable_column(
 ) -> None:
     await _sign_in(app_client, db_session, UserRole.PLAYER_PARENT)
 
-    seeded = await app_client.patch("/me/profile", json={"school": "Lincoln High"})
+    seeded = await app_client.patch(
+        "/me/profile", json={"emergency_contact_name": "Jamie Guardian"}
+    )
     assert seeded.status_code == 200
-    assert seeded.json()["role_detail"]["school"] == "Lincoln High"
+    assert seeded.json()["role_detail"]["emergency_contact_name"] == "Jamie Guardian"
 
-    cleared = await app_client.patch("/me/profile", json={"school": None})
+    cleared = await app_client.patch("/me/profile", json={"emergency_contact_name": None})
     assert cleared.status_code == 200
-    assert cleared.json()["role_detail"]["school"] is None
+    assert cleared.json()["role_detail"]["emergency_contact_name"] is None
 
     reread = await app_client.get("/me/profile")
-    assert reread.json()["role_detail"]["school"] is None
+    assert reread.json()["role_detail"]["emergency_contact_name"] is None
 
 
 async def test_omitted_key_leaves_the_column_unchanged(
@@ -143,14 +146,16 @@ async def test_omitted_key_leaves_the_column_unchanged(
 ) -> None:
     await _sign_in(app_client, db_session, UserRole.PLAYER_PARENT)
 
-    seeded = await app_client.patch("/me/profile", json={"school": "Lincoln High"})
+    seeded = await app_client.patch(
+        "/me/profile", json={"emergency_contact_name": "Jamie Guardian"}
+    )
     assert seeded.status_code == 200
 
     unrelated_update = await app_client.patch(
-        "/me/profile", json={"emergency_contact_name": "Jamie Guardian"}
+        "/me/profile", json={"emergency_contact_phone": "+14155552671"}
     )
     assert unrelated_update.status_code == 200
-    assert unrelated_update.json()["role_detail"]["school"] == "Lincoln High"
+    assert unrelated_update.json()["role_detail"]["emergency_contact_name"] == "Jamie Guardian"
 
 
 async def test_explicit_null_for_first_name_is_rejected_not_500(
@@ -166,17 +171,34 @@ async def test_explicit_null_for_first_name_is_rejected_not_500(
     assert any(f["field"] == "first_name" for f in body["error"]["fields"])
 
 
-async def test_player_parent_can_update_both_player_and_contact_fields(
+async def test_player_parent_can_update_contact_fields(
     app_client: AsyncClient, db_session: AsyncSession
 ) -> None:
     await _sign_in(app_client, db_session, UserRole.PLAYER_PARENT)
 
     response = await app_client.patch(
         "/me/profile",
-        json={"school": "Lincoln High", "emergency_contact_name": "Jamie Guardian"},
+        json={
+            "emergency_contact_name": "Jamie Guardian",
+            "emergency_contact_phone": "+14155552671",
+        },
     )
 
     assert response.status_code == 200
     detail = response.json()["role_detail"]
-    assert detail["school"] == "Lincoln High"
     assert detail["emergency_contact_name"] == "Jamie Guardian"
+    assert detail["emergency_contact_phone"] == "+14155552671"
+    assert detail["profile_count"] == 0
+
+
+async def test_player_parent_cannot_write_school_here_any_more(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """data-model.md §35, research.md R-34: `school` moved off the
+    account's role detail onto `PlayerProfile` — it is no longer editable
+    through `/me/profile` for any role, including player_parent."""
+    await _sign_in(app_client, db_session, UserRole.PLAYER_PARENT)
+
+    response = await app_client.patch("/me/profile", json={"school": "Lincoln High"})
+
+    assert response.status_code == 422

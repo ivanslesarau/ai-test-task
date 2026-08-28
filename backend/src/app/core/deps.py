@@ -1,4 +1,5 @@
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import Cookie, Depends, Request
@@ -9,16 +10,19 @@ from app.core.errors import NotAuthenticated, PermissionDenied
 from app.db.session import get_db_session
 from app.models.enums import UserRole
 from app.models.user import User
+from app.services.approval_service import ApprovalService
 from app.services.auth_service import AuthService
 from app.services.branding_service import BrandingService
+from app.services.child_signin_service import ChildSigninService
 from app.services.erasure_service import ErasureService
+from app.services.family_service import FamilyService
 from app.services.join_service import JoinService
 from app.services.ports.email_sender import EmailSender, get_email_sender
 from app.services.ports.photo_storage import PhotoStorage, get_photo_storage
 from app.services.profile_service import ProfileService
 from app.services.share_link_service import ShareLinkService
-from app.services.trainer_context_service import TrainerContextService
 from app.services.trainer_service import TrainerService
+from app.services.training_context_service import TrainingContextService
 from app.services.user_admin_service import UserAdminService
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
@@ -155,26 +159,83 @@ def get_trainer_service(db_session: DbSessionDep) -> TrainerService:
 TrainerServiceDep = Annotated[TrainerService, Depends(get_trainer_service)]
 
 
-def get_trainer_context_service(db_session: DbSessionDep) -> TrainerContextService:
-    return TrainerContextService(db_session)
+def get_training_context_service(db_session: DbSessionDep) -> TrainingContextService:
+    return TrainingContextService(db_session)
 
 
-TrainerContextServiceDep = Annotated[TrainerContextService, Depends(get_trainer_context_service)]
+TrainingContextServiceDep = Annotated[TrainingContextService, Depends(get_training_context_service)]
 
 
-async def get_trainer_context(
-    user: CurrentUserDep, trainer_context_service: TrainerContextServiceDep
-) -> str | None:
-    """The one place an endpoint learns "which trainer is this player
-    currently looking at" (research.md R-25). No endpoint accepts a
-    `trainer_id` parameter to select context — every context-scoped route
-    Epics 02-08 add resolves it through this dependency instead, so an
-    endpoint that forgets the check is merely wrong, not vulnerable. None
-    for a non-player role, or a player with no Active association."""
-    return await trainer_context_service.resolve_active_trainer_id(user)
+_require_player_parent_role = require_roles(UserRole.PLAYER_PARENT)
 
 
-TrainerContextDep = Annotated[str | None, Depends(get_trainer_context)]
+async def require_parent(
+    user: Annotated[User, Depends(_require_player_parent_role)],
+    auth_service: AuthServiceDep,
+    training_context_service: TrainingContextServiceDep,
+) -> User:
+    """FR-132, FR-133: refuses a caller whose account is a signed-in
+    child, on top of the existing player_parent role gate every family
+    endpoint already carries. FR-132's child is an ordinary `player_parent`
+    account (research.md R-38), so `require_roles` alone cannot keep them
+    out; `TrainingContextService.is_child_account` is the one place
+    "is this caller a child sign-in" is derived (research.md R-38), reused
+    here rather than re-queried. Every action FR-132 forbids is refused
+    **on the request** — this dependency, not a hidden control — exactly
+    as `require_roles` records a `permission_denied` audit entry for its
+    own refusal (FR-020)."""
+    if await training_context_service.is_child_account(user):
+        await auth_service.record_permission_denied(
+            actor_user_id=user.id,
+            detail="child sign-in attempted an action reserved for the owning parent",
+        )
+        raise PermissionDenied("Only the account holder can do this.")
+    return user
+
+
+RequireParentDep = Annotated[User, Depends(require_parent)]
+
+
+def get_child_signin_service(
+    db_session: DbSessionDep, settings: SettingsDep, email_sender: EmailSenderDep
+) -> ChildSigninService:
+    return ChildSigninService(db_session, settings, email_sender)
+
+
+ChildSigninServiceDep = Annotated[ChildSigninService, Depends(get_child_signin_service)]
+
+
+@dataclass(frozen=True)
+class ResolvedTrainingContext:
+    """The validated `(player_profile_id, trainer_user_id)` pair
+    (data-model.md §27, research.md R-36, R-48). Both fields are `None`
+    together — a caller with no reachable context — or both set; nothing
+    in this codebase ever writes the mixed state, and `TrainingContextService`
+    treats one as the other on read."""
+
+    player_profile_id: str | None
+    trainer_id: str | None
+
+
+async def get_training_context(
+    user: CurrentUserDep, training_context_service: TrainingContextServiceDep
+) -> ResolvedTrainingContext:
+    """The one place an endpoint learns "which player profile and which
+    trainer is this account currently looking at" (research.md R-25,
+    R-48). Renamed from `get_trainer_context`: the boundary is now a pair,
+    because a sibling on the same account is a different context even
+    with the same trainer (FR-117). No endpoint accepts a `player_profile_id`
+    or `trainer_id` parameter to select context — every context-scoped
+    route Epics 02-08 add resolves it through this dependency instead, so
+    an endpoint that forgets the check is merely wrong, not vulnerable.
+    Both fields are `None` for a non-player role, a signed-in child's
+    account before Phase C exists, or a player with no Active
+    association."""
+    player_profile_id, trainer_id = await training_context_service.resolve_active_context(user)
+    return ResolvedTrainingContext(player_profile_id=player_profile_id, trainer_id=trainer_id)
+
+
+TrainingContextDep = Annotated[ResolvedTrainingContext, Depends(get_training_context)]
 
 
 def get_branding_service(
@@ -184,3 +245,24 @@ def get_branding_service(
 
 
 BrandingServiceDep = Annotated[BrandingService, Depends(get_branding_service)]
+
+
+def get_family_service(
+    db_session: DbSessionDep,
+    settings: SettingsDep,
+    photo_storage: PhotoStorageDep,
+    share_link_service: ShareLinkServiceDep,
+) -> FamilyService:
+    return FamilyService(db_session, settings, photo_storage, share_link_service)
+
+
+FamilyServiceDep = Annotated[FamilyService, Depends(get_family_service)]
+
+
+def get_approval_service(
+    db_session: DbSessionDep, settings: SettingsDep, email_sender: EmailSenderDep
+) -> ApprovalService:
+    return ApprovalService(db_session, settings, email_sender)
+
+
+ApprovalServiceDep = Annotated[ApprovalService, Depends(get_approval_service)]

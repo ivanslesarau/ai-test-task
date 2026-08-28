@@ -16,6 +16,16 @@ export function isPlayerParent(user: CurrentUser | undefined): boolean {
   return hasRole(user, 'player_parent')
 }
 
+/** True when this account is a child's own sign-in — reads the
+ * server-derived `is_child_account` field, never inferred from role
+ * (a signed-in child is an ordinary `player_parent` account,
+ * research.md R-38). Every parent-only control renders through this
+ * predicate rather than an inline `session.is_child_account &&`, so the
+ * rule has one home (US11/US12, tasks.md T423). */
+export function isChildAccount(user: CurrentUser | undefined): boolean {
+  return user?.is_child_account ?? false
+}
+
 export function landingPathForRole(role: UserRole): string {
   // Every role currently lands on the same dashboard shell, which branches
   // its content by role internally (T067). A distinct path per role can be

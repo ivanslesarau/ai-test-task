@@ -4,9 +4,14 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utcnow
-from app.models.association import TrainerPlayerAssociation
 from app.models.enums import AccountStatus, UserRole
-from tests.helpers import create_session_cookie, create_trainer_with_link, create_user
+from tests.helpers import (
+    create_association,
+    create_player_profile,
+    create_session_cookie,
+    create_trainer_with_link,
+    create_user,
+)
 
 
 async def test_valid_code_returns_only_business_name_branding_and_viewer_state(
@@ -66,12 +71,8 @@ async def test_signed_in_player_already_associated_sees_that_state(
 ) -> None:
     trainer, link = await create_trainer_with_link(db_session)
     player = await create_user(db_session, role=UserRole.PLAYER_PARENT)
-    db_session.add(
-        TrainerPlayerAssociation(
-            trainer_user_id=trainer.id, player_user_id=player.id, status="active"
-        )
-    )
-    await db_session.flush()
+    profile = await create_player_profile(db_session, account=player, kind="self")
+    await create_association(db_session, trainer_id=trainer.id, player_profile_id=profile.id)
     token = await create_session_cookie(db_session, player)
     await db_session.commit()
     app_client.cookies.set("pp_session", token)

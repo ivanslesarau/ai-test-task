@@ -15,12 +15,22 @@ export interface CurrentUser {
   first_name: string
   last_name: string
   photo_url: string | null
-  /** Player/Parent only; null for every other role and for a player who
-   * belongs to no trainer (extension 2026-08-26, FR-086). */
+  /** Which player profile the caller is currently looking at. Player/Parent
+   * only, and null for every other role and for an account with no
+   * reachable context (extension 2026-08-27, contract v1.2.0, FR-117). */
+  active_player_profile_id: string | null
+  /** The trainer half of the active pair. Null under the same conditions
+   * as `active_player_profile_id`; the two are always both set or both
+   * null. Changed only through `PUT /me/context`. */
   active_trainer_id: string | null
-  /** How many switchable trainers the caller has. Zero for every
-   * non-player role. The switcher renders only above one (FR-088). */
-  trainer_count: number
+  /** How many switchable profile-and-trainer pairs the caller has,
+   * replacing `trainer_count` (contract v1.2.0). The switcher renders
+   * only above one (FR-118, FR-119). Zero for every non-player role. */
+  context_count: number
+  /** True when this account is a child's own sign-in — derived
+   * server-side, never stored (research.md R-38). The interface uses it
+   * to withhold the controls FR-132 forbids. */
+  is_child_account: boolean
   /** Resolved server-side per FR-101 — a trainer's own, a player's
    * active context's, or the platform default. Coaches receive the
    * default until US-01.08 (research.md R-33). */
@@ -42,13 +52,16 @@ export interface CoachDetail {
 }
 
 export interface PlayerParentDetail {
-  school: string | null
-  jersey_number: string | null
-  /** Assigned by a trainer in a later feature. Never writable here. */
-  skill_level: string | null
+  /** What remains true of the *account* rather than of any one player on
+   * it (contract v1.2.0, research.md R-34). `school`, `jersey_number`,
+   * and `skill_level` moved to `PlayerProfile`, reached through
+   * `/me/players`. */
   emergency_contact_name: string | null
   emergency_contact_phone: string | null
   emergency_contact_relation: string | null
+  /** How many live player profiles the account holds. Zero is valid for
+   * an account a Super Admin created. */
+  profile_count: number
 }
 
 export type RoleDetail = TrainerDetail | CoachDetail | PlayerParentDetail | null
@@ -80,6 +93,12 @@ export interface OwnProfileUpdate {
   credentials?: string | null
   certifications?: string | null
   is_publicly_visible?: boolean
+  /** Contract-unchanged (`openapi.yaml` still lists both): no role can
+   * successfully submit either any more, now that they live on
+   * `PlayerProfile` (data-model.md §35) — the server 422s them for every
+   * role, including player_parent. The frontend form no longer offers
+   * them (features/profile/edit-own), but the wire shape still accepts
+   * them syntactically, so the type is not narrowed here. */
   school?: string | null
   jersey_number?: string | null
   emergency_contact_name?: string | null
@@ -221,12 +240,24 @@ export interface ShareLink {
   created_at: string
 }
 
-export type JoinViewerState = 'anonymous' | 'can_join' | 'already_associated' | 'role_cannot_join'
+export type JoinViewerState =
+  | 'anonymous'
+  | 'can_join'
+  | 'already_associated'
+  | 'role_cannot_join'
+  /** US11 (FR-137, FR-138): the caller is a signed-in child. The platform
+   * has already raised an approval request and emailed the parent — the
+   * join page only needs to explain this, not act again. */
+  | 'child_must_ask_parent'
+  /** US13 (FR-122): the caller is a parent holding at least one child
+   * profile — ask who this trainer is for. `selectable_profiles` is
+   * present only for this state. */
+  | 'choose_family_members'
 
 export interface JoinLinkPreview {
   trainer_display_name: string
   branding: PortalBranding
-  viewer: { state: JoinViewerState }
+  viewer: { state: JoinViewerState; selectable_profiles?: JoinSelectableProfile[] }
 }
 
 export interface JoinRegistrationRequest {
@@ -241,37 +272,33 @@ export interface JoinRegistrationRequest {
   gender: Gender
 }
 
+/**
+ * **Changed in 1.2.0** (Story 13, tasks.md T413/T414): a single join may
+ * associate several family members, so the result reports sets rather
+ * than one boolean.
+ */
 export interface JoinResult {
   trainer_id: string
   trainer_display_name: string
-  already_associated: boolean
-  active_trainer_id: string
-}
-
-export interface TrainerContextEntry {
-  trainer_id: string
-  display_name: string
-  branding: PortalBranding
-  joined_at: string
-}
-
-export interface TrainerContextList {
+  associated_profile_ids: string[]
+  already_associated_profile_ids: string[]
+  active_player_profile_id: string | null
   active_trainer_id: string | null
-  trainers: TrainerContextEntry[]
-}
-
-export interface TrainerContextRequest {
-  trainer_id: string
 }
 
 export interface TrainerPlayerSummary {
-  player_user_id: string
+  /** Changed in 1.2.0: names a player profile rather than an account —
+   * `player_user_id` is gone (data-model.md §35, research.md R-49). */
+  player_profile_id: string
   display_name: string
-  is_self: boolean
+  kind: PlayerProfileKind
   age: number | null
   gender: string | null
   joined_at: string
   photo_url: string | null
+  /** The account responsible for this player — the player themselves for
+   * a `self` profile, the parent for a `child` (FR-113, FR-116). */
+  responsible_contact: ResponsibleContact
 }
 
 export interface TrainerPlayerPage {
@@ -279,4 +306,172 @@ export interface TrainerPlayerPage {
   page: number
   page_size: number
   total: number
+}
+
+// -----------------------------------------------------------------------
+// Extension (2026-08-27): family accounts, child sign-in, approvals
+// Mirrors contracts/openapi.yaml v1.2.0.
+// -----------------------------------------------------------------------
+
+export type PlayerProfileKind = 'self' | 'child'
+
+export interface ResponsibleContact {
+  /** The adult a trainer contacts about a player. Never carries the
+   * responsible account's identifier (FR-116, SC-040). */
+  display_name: string
+  email: string | null
+  phone: string | null
+}
+
+export interface TrainingContextEntry {
+  /** One switchable pair, replacing `TrainerContextEntry` (research.md
+   * R-49). */
+  player_profile_id: string
+  player_display_name: string
+  player_profile_kind: PlayerProfileKind
+  trainer_id: string
+  trainer_display_name: string
+  branding: PortalBranding
+  joined_at: string
+}
+
+export interface TrainingContextList {
+  active_player_profile_id: string | null
+  active_trainer_id: string | null
+  contexts: TrainingContextEntry[]
+}
+
+export interface TrainingContextRequest {
+  player_profile_id: string
+  trainer_id: string
+}
+
+export interface PlayerProfileAssociation {
+  association_id: string
+  trainer_id: string
+  trainer_display_name: string
+  joined_at: string
+}
+
+export interface PlayerProfile {
+  id: string
+  kind: PlayerProfileKind
+  display_name: string
+  first_name: string | null
+  last_name: string | null
+  date_of_birth: string | null
+  /** Derived from `date_of_birth`, never stored (R-31). */
+  age: number | null
+  gender: string | null
+  school: string | null
+  jersey_number: string | null
+  /** Assigned by a trainer in a later feature. Never writable by the
+   * family (FR-107). */
+  skill_level: string | null
+  photo_url: string | null
+  tokens_without_approval: boolean
+  has_sign_in: boolean
+  associations: PlayerProfileAssociation[]
+}
+
+export interface PlayerProfileList {
+  profiles: PlayerProfile[]
+}
+
+export interface CreateChildProfileRequest {
+  first_name: string
+  last_name: string
+  date_of_birth: string
+  gender: Gender
+  school?: string | null
+  jersey_number?: string | null
+  trainer_ids?: string[]
+  acknowledge_possible_duplicate?: boolean
+}
+
+export interface PlayerProfileUpdate {
+  first_name?: string
+  last_name?: string
+  date_of_birth?: string
+  gender?: Gender
+  school?: string | null
+  jersey_number?: string | null
+  tokens_without_approval?: boolean
+}
+
+export interface DuplicateProfileError {
+  error: {
+    code: 'possible_duplicate_profile'
+    message: string
+    matches: PlayerProfile[]
+  }
+}
+
+export interface AddPlayerTrainerRequest {
+  code?: string | null
+  trainer_id?: string | null
+}
+
+export interface GrantChildSignInRequest {
+  email: string
+}
+
+export interface ChildSignIn {
+  player_profile_id: string
+  email: string
+  invitation_sent: boolean
+}
+
+export interface JoinSelectableProfile {
+  player_profile_id: string
+  display_name: string
+  kind: PlayerProfileKind
+  already_associated: boolean
+}
+
+export interface JoinAcceptRequest {
+  player_profile_ids?: string[]
+}
+
+export type ApprovalRequestKind = 'join_trainer' | 'usd_payment' | 'token_spend'
+
+export type ApprovalRequestStatus =
+  | 'pending_parent_approval'
+  | 'info_requested'
+  | 'approved'
+  | 'denied'
+  | 'expired'
+  | 'withdrawn'
+
+export interface ApprovalRequest {
+  id: string
+  player_profile_id: string
+  player_display_name: string
+  kind: ApprovalRequestKind
+  status: ApprovalRequestStatus
+  trainer_id: string | null
+  trainer_display_name: string | null
+  amount_minor: number | null
+  currency: string | null
+  requested_at: string
+  expires_at: string
+  parent_note: string | null
+  child_note: string | null
+  resolved_at: string | null
+  resolved_by: 'parent' | 'child' | 'super_admin' | null
+}
+
+export interface ApprovalRequestPage {
+  items: ApprovalRequest[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export interface ApprovalDecisionRequest {
+  note?: string | null
+}
+
+export interface ApprovalInfoRequest {
+  note: string
 }

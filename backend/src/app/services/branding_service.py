@@ -14,7 +14,7 @@ from app.schemas.branding import (
 from app.services.image_processing import UnsupportedImageError, decode_and_validate, encode
 from app.services.ports.photo_storage import PhotoStorage
 from app.services.svg_screening import UnsafeSvgError, screen_svg
-from app.services.trainer_context_service import TrainerContextService
+from app.services.training_context_service import TrainingContextService
 
 _MAX_LOGO_DIMENSION = 200
 
@@ -31,7 +31,7 @@ class BrandingService:
 
     def __init__(self, db_session: AsyncSession, photo_storage: PhotoStorage) -> None:
         self._users = UserRepository(db_session)
-        self._trainer_context = TrainerContextService(db_session)
+        self._training_context = TrainingContextService(db_session)
         self._photo_storage = photo_storage
 
     async def resolve_for_viewer(self, user: User) -> PortalBranding:
@@ -47,7 +47,10 @@ class BrandingService:
             return build_portal_branding_out(trainer_org)
 
         if user.role_enum is UserRole.PLAYER_PARENT:
-            active_trainer_id = await self._trainer_context.resolve_active_trainer_id(user)
+            (
+                _active_player_profile_id,
+                active_trainer_id,
+            ) = await self._training_context.resolve_active_context(user)
             if active_trainer_id is None:
                 return DEFAULT_PORTAL_BRANDING
             trainer = await self._users.get_by_id(active_trainer_id)

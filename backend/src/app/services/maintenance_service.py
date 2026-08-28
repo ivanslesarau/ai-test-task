@@ -1,5 +1,5 @@
 from datetime import timedelta
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import CursorResult, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +8,10 @@ from app.db.base import utcnow
 from app.models.association import LinkLookupAttempt
 from app.models.auth import Session as SessionModel
 from app.models.auth import SignInAttempt
+from app.repositories.approval_repository import ApprovalRepository
+
+if TYPE_CHECKING:
+    from app.services.approval_service import ApprovalService
 
 # Retained briefly past expiry/revocation so a request arriving on a
 # just-revoked session is distinguishable from one on a token that never
@@ -60,3 +64,22 @@ class MaintenanceService:
             ),
         )
         return result.rowcount
+
+    async def expire_lapsed_approval_requests(self, approval_service: "ApprovalService") -> int:
+        """Sets every live `approval_requests` row past its `expires_at`
+        to `expired`, notifying both the parent and the child (FR-155,
+        research.md R-43). Delegates to `ApprovalService.expire_one` per
+        candidate — unlike the row-count pruning above, an expiry writes
+        an audit entry and sends email, and `ApprovalRepository.resolve`'s
+        conditional update is what keeps this safe to run alongside a
+        person's own decision racing the same request (research.md R-41).
+        Takes the caller's `ApprovalService` rather than owning one,
+        since building it needs the email sender this service was never
+        given."""
+        candidates = await ApprovalRepository(self._session).list_lapsed_live()
+        now = utcnow()
+        expired_count = 0
+        for request in candidates:
+            if await approval_service.expire_one(request, now=now):
+                expired_count += 1
+        return expired_count

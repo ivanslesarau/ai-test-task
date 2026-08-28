@@ -66,20 +66,27 @@ function mockPlayerParentSession(overrides: Record<string, unknown> = {}) {
         first_name: 'Pat',
         last_name: 'Player',
         photo_url: null,
+        active_player_profile_id: null,
         active_trainer_id: null,
-        trainer_count: 0,
+        context_count: 0,
+        is_child_account: false,
         ...overrides,
       }),
     ),
-    http.get('/api/v1/me/trainers', () =>
+    http.get('/api/v1/me/contexts', () =>
       HttpResponse.json({
+        active_player_profile_id:
+          (overrides.active_player_profile_id as string | null | undefined) ?? null,
         active_trainer_id: (overrides.active_trainer_id as string | null | undefined) ?? null,
-        trainers:
-          overrides.trainer_count === 1
+        contexts:
+          overrides.context_count === 1
             ? [
                 {
+                  player_profile_id: 'profile-a',
+                  player_display_name: 'Pat Player',
+                  player_profile_kind: 'self',
                   trainer_id: 'trainer-a',
-                  display_name: 'Elite Basketball Academy',
+                  trainer_display_name: 'Elite Basketball Academy',
                   branding: { logo_url: null, primary_color: null, updated_at: null },
                   joined_at: '2026-01-01T00:00:00Z',
                 },
@@ -119,7 +126,7 @@ describe('DashboardPage — per-role landing content', () => {
   })
 
   it('shows the zero-trainer empty state for an unassociated player', async () => {
-    mockPlayerParentSession({ trainer_count: 0, active_trainer_id: null })
+    mockPlayerParentSession({ context_count: 0, active_trainer_id: null })
     renderDashboard()
 
     expect(
@@ -128,7 +135,11 @@ describe('DashboardPage — per-role landing content', () => {
   })
 
   it("shows the active trainer's name for a player connected to exactly one", async () => {
-    mockPlayerParentSession({ trainer_count: 1, active_trainer_id: 'trainer-a' })
+    mockPlayerParentSession({
+      context_count: 1,
+      active_player_profile_id: 'profile-a',
+      active_trainer_id: 'trainer-a',
+    })
     renderDashboard()
 
     expect(await screen.findByText('Elite Basketball Academy')).toBeInTheDocument()

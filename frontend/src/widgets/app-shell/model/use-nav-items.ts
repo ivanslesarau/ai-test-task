@@ -1,5 +1,11 @@
+import { useApprovals } from '@/entities/approval/api/use-approvals'
 import { useSession } from '@/entities/session/api/use-session'
-import { isSuperAdmin, isTrainer } from '@/entities/session/model/role-guards'
+import {
+  isChildAccount,
+  isPlayerParent,
+  isSuperAdmin,
+  isTrainer,
+} from '@/entities/session/model/role-guards'
 import { directorySearchSchema } from '@/entities/user/model/directory-search'
 import type { DirectorySearch } from '@/entities/user/model/directory-search'
 import type { UserRole } from '@/shared/api/types'
@@ -19,6 +25,13 @@ export type NavItem =
   | (BaseNavItem & { to: '/admin/users'; search: DirectorySearch })
   | (BaseNavItem & { to: '/trainer/portal' })
   | (BaseNavItem & { to: '/trainer/players' })
+  | (BaseNavItem & { to: '/family' })
+  // The Approvals entry carries a count while any request is pending
+  // (FR-159, FR-105) — populated only by the live `useNavItems()` hook;
+  // `navItemsForRole`'s static list always carries `count: undefined`,
+  // since it has no session to read a count from.
+  | (BaseNavItem & { to: '/approvals'; count?: number })
+  | (BaseNavItem & { to: '/requests' })
 
 /** The directory's own default view — parsing `{}` reuses the same
  * `.catch()` fallbacks the route's `validateSearch` applies, so this can
@@ -34,15 +47,29 @@ const TRAINER_NAV_ITEMS: NavItem[] = [
   { key: 'trainer-players', label: 'Players', to: '/trainer/players' },
 ]
 
+// Extension (2026-08-27, family accounts, tasks.md T365, closed by
+// T410). D-07 recorded `player_parent`'s empty list as "correct rather
+// than missing", because the feature gave them no page beyond
+// `/profile`. Family Phase B gave them `/family`; Phase D adds Approvals
+// (a parent's decision queue) and Requests (a child's own view) — both
+// listed here so `navItemsForRole('player_parent')` proves every route
+// reachable for the entry-points regression test (a `player_parent`
+// account may be either shape). `useNavItems()` below is what actually
+// picks between the two for a live session, on `isChildAccount`.
+const PLAYER_PARENT_NAV_ITEMS: NavItem[] = [
+  { key: 'family', label: 'Family', to: '/family' },
+  { key: 'approvals', label: 'Approvals', to: '/approvals' },
+  { key: 'requests', label: 'Requests', to: '/requests' },
+]
+
 /**
  * Pure, role-keyed lookup — exported separately from the hook so a
  * regression test (`tests/routes/entry-points.test.tsx`) can enumerate
  * every role's reachable paths without rendering a component.
  *
- * `coach` and `player_parent` deliberately resolve to an empty list: this
- * feature gives them no dedicated page beyond `/profile` and the trainer
- * switcher, and a link to a page that does not exist is worse than no
- * link at all.
+ * `coach` deliberately resolves to an empty list: this feature gives it
+ * no dedicated page beyond `/profile`, and a link to a page that does not
+ * exist is worse than no link at all.
  */
 export function navItemsForRole(role: UserRole | undefined): NavItem[] {
   switch (role) {
@@ -50,8 +77,9 @@ export function navItemsForRole(role: UserRole | undefined): NavItem[] {
       return SUPER_ADMIN_NAV_ITEMS
     case 'trainer':
       return TRAINER_NAV_ITEMS
-    case 'coach':
     case 'player_parent':
+      return PLAYER_PARENT_NAV_ITEMS
+    case 'coach':
     case undefined:
       return []
   }
@@ -67,8 +95,27 @@ export function navItemsForRole(role: UserRole | undefined): NavItem[] {
  */
 export function useNavItems(): NavItem[] {
   const { data: user } = useSession()
+  const isChild = isChildAccount(user)
+  const isParent = isPlayerParent(user) && !isChild
+
+  // Only a parent has a decision queue to badge; a signed-in child skips
+  // the request entirely (FR-159).
+  const approvals = useApprovals(
+    { page: 1, page_size: 1 },
+    { enabled: isParent },
+  )
 
   if (isSuperAdmin(user)) return navItemsForRole('super_admin')
   if (isTrainer(user)) return navItemsForRole('trainer')
+  if (isPlayerParent(user)) {
+    // A parent sees Family and Approvals; a signed-in child sees Family
+    // and Requests — never both Approvals and Requests, and never the
+    // other role's entry (FR-105, FR-159).
+    return navItemsForRole('player_parent')
+      .filter((item) => (isChild ? item.to !== '/approvals' : item.to !== '/requests'))
+      .map((item) =>
+        item.to === '/approvals' ? { ...item, count: approvals.data?.total } : item,
+      )
+  }
   return []
 }

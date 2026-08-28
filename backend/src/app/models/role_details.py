@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import Boolean, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -49,43 +49,18 @@ class CoachDetail(Base):
     is_publicly_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
-class PlayerDetail(Base):
-    """A player's participation attributes (data-model.md §4.3, §19.1).
-
-    `skill_level` is never writable through the profile API (FR-007,
-    FR-033) and is free text rather than an enum because Epic-01 open
-    question Q-01.01 leaves the vocabulary undecided.
-
-    The five columns from `player_name` onward were added by the
-    2026-08-26 extension (US-01.02). `player_name` is null when the
-    account holder is the player, so correcting the account holder's name
-    never leaves a stale copy behind. `active_trainer_user_id` is never
-    trusted as read — TrainerContextService resolves and repairs it
-    (research.md R-24); it is nullable because a player may legitimately
-    hold zero associations.
-    """
-
-    __tablename__ = "player_details"
-
-    user_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
-    )
-    school: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    jersey_number: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    skill_level: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    player_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    date_of_birth: Mapped[date | None] = mapped_column(nullable=True)
-    gender: Mapped[str | None] = mapped_column(String, nullable=True)
-    is_self: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    active_trainer_user_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("users.id"), nullable=True, index=True
-    )
-
-
 class ParentContact(Base):
     """Emergency contact information for a player_parent account
-    (data-model.md §4.4). Child profiles and parent-child links are out of
-    scope for this feature.
+    (data-model.md §4.4, §29.3). Held once against the account and
+    serving every player profile on it — the family's single contact
+    record, now load-bearing since FR-113 makes it what a trainer reaches
+    to contact the responsible adult for a CHILD profile as well as a
+    SELF one.
+
+    `player_details` — which used to sit alongside this table — is
+    dropped (data-model.md §29.2). Its columns now live on
+    `player_profiles` (`app.models.player_profile`), which is
+    per-profile rather than per-account (research.md R-34).
     """
 
     __tablename__ = "parent_contacts"

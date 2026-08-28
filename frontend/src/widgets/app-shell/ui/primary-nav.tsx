@@ -1,5 +1,6 @@
 import { Link } from '@tanstack/react-router'
 
+import { Badge } from '@/shared/ui/badge'
 import { Button } from '@/shared/ui/button'
 import type { NavItem } from '@/widgets/app-shell/model/use-nav-items'
 import { useNavItems } from '@/widgets/app-shell/model/use-nav-items'
@@ -40,6 +41,31 @@ function NavLink({ item }: { item: NavItem }) {
       return (
         <Button asChild variant="ghost" size="sm">
           <Link to="/trainer/players" activeProps={{ className: ACTIVE_CLASS_NAME }}>
+            {item.label}
+          </Link>
+        </Button>
+      )
+    case '/family':
+      return (
+        <Button asChild variant="ghost" size="sm">
+          <Link to="/family" activeProps={{ className: ACTIVE_CLASS_NAME }}>
+            {item.label}
+          </Link>
+        </Button>
+      )
+    case '/approvals':
+      return (
+        <Button asChild variant="ghost" size="sm">
+          <Link to="/approvals" activeProps={{ className: ACTIVE_CLASS_NAME }}>
+            {item.label}
+            {Boolean(item.count) && <Badge variant="secondary">{item.count}</Badge>}
+          </Link>
+        </Button>
+      )
+    case '/requests':
+      return (
+        <Button asChild variant="ghost" size="sm">
+          <Link to="/requests" activeProps={{ className: ACTIVE_CLASS_NAME }}>
             {item.label}
           </Link>
         </Button>

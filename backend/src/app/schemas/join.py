@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, mo
 from app.core.errors import ValidationFailure
 from app.core.phone import normalize_phone
 from app.db.base import utcnow
-from app.models.enums import Gender
+from app.models.enums import Gender, PlayerProfileKind
 from app.schemas.branding import PortalBranding
 
 # Same reservation as CreateUserRequest (FR-076, data-model.md §10).
@@ -28,13 +28,41 @@ class JoinLinkPreview(BaseModel):
     viewer: "JoinLinkPreviewViewer"
 
 
+class JoinSelectableProfile(BaseModel):
+    """One family member offered on the "who will train with this
+    trainer?" question (FR-122, Story 13)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    player_profile_id: str
+    display_name: str
+    kind: PlayerProfileKind
+    already_associated: bool
+
+
 class JoinLinkPreviewViewer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    state: str  # anonymous | can_join | already_associated | role_cannot_join
+    # anonymous | can_join | choose_family_members | already_associated
+    # | role_cannot_join | child_must_ask_parent
+    state: str
+    # Present only for `choose_family_members` (FR-122, Story 13).
+    selectable_profiles: list[JoinSelectableProfile] | None = None
 
 
 JoinLinkPreview.model_rebuild()
+
+
+class JoinAcceptRequest(BaseModel):
+    """Which family members join the link's trainer (FR-122, Story 13).
+    Omitted or empty `player_profile_ids` associates nobody and changes
+    nothing, except for an account holding exactly one live profile,
+    which uses it — the 1.1.0 behaviour, preserved (Story 13 scenarios
+    3-4)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    player_profile_ids: list[str] = Field(default_factory=list)
 
 
 class JoinRegistrationRequest(BaseModel):
@@ -90,9 +118,15 @@ class JoinRegistrationRequest(BaseModel):
 
 
 class JoinResult(BaseModel):
+    """**Changed in 1.2.0** (Story 13): a single join may associate
+    several family members, so the result reports sets rather than one
+    boolean."""
+
     model_config = ConfigDict(extra="forbid")
 
     trainer_id: str
     trainer_display_name: str
-    already_associated: bool
-    active_trainer_id: str
+    associated_profile_ids: list[str]
+    already_associated_profile_ids: list[str]
+    active_player_profile_id: str | None
+    active_trainer_id: str | None

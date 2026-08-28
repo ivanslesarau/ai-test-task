@@ -9,6 +9,7 @@ from app.models.enums import AccountStatus, UserRole, is_transition_allowed
 from app.models.user import User, UserProfile
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.invitation_repository import InvitationRepository
+from app.repositories.player_profile_repository import PlayerProfileRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import NewAccountInput, UserRepository
 from app.schemas.admin_user import (
@@ -18,7 +19,7 @@ from app.schemas.admin_user import (
     UserDetail,
     UserSummary,
 )
-from app.schemas.role_detail import build_role_detail_out
+from app.schemas.role_detail import RoleDetailOut, build_role_detail_out
 from app.services.ports.email_sender import EmailSender
 from app.services.share_link_service import ShareLinkService
 from app.services.templates.invitation import render_invitation_email
@@ -63,6 +64,17 @@ class UserAdminService:
         self._audit = AuditRepository(db_session)
         self._sessions = SessionRepository(db_session)
         self._share_links = ShareLinkService(db_session, settings)
+        self._profiles = PlayerProfileRepository(db_session)
+
+    async def _role_detail_out(self, user: User) -> RoleDetailOut:
+        profile_count = (
+            len(await self._profiles.list_live_for_account(user.id))
+            if user.role_enum is UserRole.PLAYER_PARENT
+            else 0
+        )
+        return build_role_detail_out(
+            await self._users.get_role_detail(user), profile_count=profile_count
+        )
 
     async def create_user(
         self,
@@ -134,7 +146,7 @@ class UserAdminService:
 
         profile = await self._users.get_profile(user.id)
         assert profile is not None
-        role_detail = build_role_detail_out(await self._users.get_role_detail(user))
+        role_detail = await self._role_detail_out(user)
 
         return CreatedUser(
             user=UserDetail(
@@ -171,7 +183,7 @@ class UserAdminService:
             raise NotFound("No such user.")
         profile = await self._users.get_profile(user_id)
         assert profile is not None
-        role_detail = build_role_detail_out(await self._users.get_role_detail(user))
+        role_detail = await self._role_detail_out(user)
         photo_url = f"/media/photos/{profile.photo_key}" if profile.photo_key else None
 
         return UserDetail(
@@ -245,6 +257,20 @@ class UserAdminService:
         # dies immediately rather than at the session's natural expiry
         # (FR-012, SC-007).
         await self._sessions.revoke_all_for_user(user.id)
+
+        if user.role_enum is UserRole.PLAYER_PARENT:
+            # research.md R-50: a child's access is derived from the
+            # parent's status, so authentication alone would already
+            # refuse them on their next request — this additionally
+            # revokes every already-open child session in this same
+            # transaction, so access dies immediately rather than at that
+            # session's own next check (FR-012, FR-136). Reactivating the
+            # parent needs no mirroring step: nothing was stored on the
+            # child's row to undo.
+            for child_profile in await self._profiles.list_signed_in_children(user.id):
+                assert child_profile.sign_in_user_id is not None
+                await self._sessions.revoke_all_for_user(child_profile.sign_in_user_id)
+
         await self._audit.add(
             action="user_deactivated", actor_user_id=actor.id, target_user_id=user.id
         )
