@@ -14,6 +14,7 @@ from app.core.password_policy import validate_password
 from app.core.rate_limit import check_rate_limit
 from app.core.security import generate_token, hash_password, hash_token, verify_password
 from app.db.base import utcnow
+from app.models.auth import Session as SessionModel
 from app.models.enums import AccountStatus
 from app.models.user import User
 from app.repositories.audit_repository import AuditRepository
@@ -22,6 +23,7 @@ from app.repositories.player_profile_repository import PlayerProfileRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.sign_in_attempt_repository import SignInAttemptRepository
 from app.repositories.user_repository import UserRepository
+from app.services.impersonation_service import ImpersonationService
 
 
 def _mask_email(email: str) -> str:
@@ -47,6 +49,7 @@ class AuthService:
         self._audit = AuditRepository(db_session)
         self._invitations = InvitationRepository(db_session)
         self._profiles = PlayerProfileRepository(db_session)
+        self._impersonation = ImpersonationService(db_session, settings)
 
     async def _child_access_blocked(self, user: User) -> bool:
         """research.md R-50: a child sign-in's access follows the owning
@@ -114,6 +117,16 @@ class AuthService:
         expiry (FR-011). Raises NotAuthenticated for any invalid, expired,
         revoked session, or one whose account is no longer Active
         (FR-018)."""
+        user, _ = await self.authenticate_session_record(raw_token)
+        return user
+
+    async def authenticate_session_record(self, raw_token: str) -> tuple[User, SessionModel]:
+        """Same validation as `authenticate_session`, additionally
+        returning the `sessions` row itself. `get_principal` (research.md
+        R2-14) needs the record to read `impersonation_id`; this method
+        exists so that resolution stays a single query path rather than
+        being duplicated in `core/deps.py`. `authenticate_session`'s own
+        behaviour is unchanged — it is now a one-line wrapper over this."""
         record = await self._sessions.find_active_by_token_hash(hash_token(raw_token))
         if record is None or not SessionRepository.is_usable(record):
             raise NotAuthenticated("Sign in to continue.")
@@ -130,11 +143,15 @@ class AuthService:
             raise NotAuthenticated("Sign in to continue.")
 
         await self._sessions.touch(record, idle_days=self._settings.session_idle_days)
-        return user
+        return user, record
 
     async def sign_out(self, raw_token: str) -> None:
         record = await self._sessions.find_active_by_token_hash(hash_token(raw_token))
         if record is not None:
+            # data-model.md §114: close any open impersonation riding this
+            # session as `signed_out`, before the session itself is
+            # revoked (FR-046).
+            await self._impersonation.close_for_signed_out_session(record)
             await self._sessions.revoke(record)
 
     async def check_invitation(self, raw_token: str) -> tuple[str, datetime]:

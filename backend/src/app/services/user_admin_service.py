@@ -20,6 +20,7 @@ from app.schemas.admin_user import (
     UserSummary,
 )
 from app.schemas.role_detail import RoleDetailOut, build_role_detail_out
+from app.services.impersonation_service import ImpersonationService
 from app.services.ports.email_sender import EmailSender
 from app.services.share_link_service import ShareLinkService
 from app.services.templates.invitation import render_invitation_email
@@ -65,6 +66,7 @@ class UserAdminService:
         self._sessions = SessionRepository(db_session)
         self._share_links = ShareLinkService(db_session, settings)
         self._profiles = PlayerProfileRepository(db_session)
+        self._impersonation = ImpersonationService(db_session, settings)
 
     async def _role_detail_out(self, user: User) -> RoleDetailOut:
         profile_count = (
@@ -257,6 +259,11 @@ class UserAdminService:
         # dies immediately rather than at the session's natural expiry
         # (FR-012, SC-007).
         await self._sessions.revoke_all_for_user(user.id)
+        # data-model.md §114, FR-050: ends any open impersonation whose
+        # target this account is, or whose admin this account is, in the
+        # same transaction as the status change and the session
+        # revocation above.
+        await self._impersonation.close_for_deactivated_account(user.id)
 
         if user.role_enum is UserRole.PLAYER_PARENT:
             # research.md R-50: a child's access is derived from the

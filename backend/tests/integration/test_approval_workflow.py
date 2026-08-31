@@ -105,9 +105,7 @@ async def test_the_full_approval_workflow(
     # 12.5 — the child sees the resolved status.
     app_client.cookies.set("pp_session", child_token)
     own_requests_after = await app_client.get("/me/requests")
-    resolved_item = next(
-        i for i in own_requests_after.json()["items"] if i["id"] == request_id
-    )
+    resolved_item = next(i for i in own_requests_after.json()["items"] if i["id"] == request_id)
     assert resolved_item["status"] == "approved"
 
     # 12.6 — approving the same request again is refused, not repeated.
@@ -180,9 +178,7 @@ async def test_the_full_approval_workflow(
 
     app_client.cookies.set("pp_session", parent_token)
     queue_after_withdrawal = await app_client.get("/me/approvals")
-    assert all(
-        item["id"] != withdraw_request_id for item in queue_after_withdrawal.json()["items"]
-    )
+    assert all(item["id"] != withdraw_request_id for item in queue_after_withdrawal.json()["items"])
 
     # 12.11 — the child cannot approve their own request.
     fifth_request_id, _ = await _raise_join_request(
@@ -211,11 +207,7 @@ async def test_the_full_approval_workflow(
     assert child_profile.id in (approved_entry.detail or "")
 
     denied_audit = (
-        (
-            await db_session.execute(
-                select(AuditEntry).where(AuditEntry.action == "approval_denied")
-            )
-        )
+        (await db_session.execute(select(AuditEntry).where(AuditEntry.action == "approval_denied")))
         .scalars()
         .all()
     )

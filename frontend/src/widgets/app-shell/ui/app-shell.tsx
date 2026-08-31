@@ -106,6 +106,40 @@ function CrumbLink({ crumb }: { crumb: BreadcrumbCrumb }) {
           <Link to="/requests">{crumb.label}</Link>
         </BreadcrumbLink>
       );
+    case "/my-times":
+      return (
+        <BreadcrumbLink asChild>
+          <Link to="/my-times">{crumb.label}</Link>
+        </BreadcrumbLink>
+      );
+    case "/availability":
+      return (
+        <BreadcrumbLink asChild>
+          <Link to="/availability">{crumb.label}</Link>
+        </BreadcrumbLink>
+      );
+    case "/trainer/coaches":
+      return (
+        <BreadcrumbLink asChild>
+          <Link to="/trainer/coaches">{crumb.label}</Link>
+        </BreadcrumbLink>
+      );
+    case "/trainer/coaches/$coachUserId":
+      return (
+        <BreadcrumbLink asChild>
+          <Link to="/trainer/coaches/$coachUserId" params={crumb.params}>
+            {crumb.label}
+          </Link>
+        </BreadcrumbLink>
+      );
+    case "/admin/impersonations":
+      return (
+        <BreadcrumbLink asChild>
+          <Link to="/admin/impersonations" search={crumb.search}>
+            {crumb.label}
+          </Link>
+        </BreadcrumbLink>
+      );
   }
 }
 

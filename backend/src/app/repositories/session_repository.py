@@ -64,3 +64,17 @@ class SessionRepository:
     def is_usable(record: SessionModel, *, now: datetime | None = None) -> bool:
         now = now or utcnow()
         return record.revoked_at is None and record.expires_at > now
+
+    async def clear_impersonation_pointer(self, impersonation_id: str) -> None:
+        """Clears `impersonation_id` on every `sessions` row that still
+        points at the given impersonation (data-model.md §106). An admin
+        can hold several live sessions across devices, but at most one
+        open impersonation (FR-048); when superseding or closing it, every
+        pointer to it — not only the one riding the current request — must
+        be cleared so no session is left pointing at a closed row."""
+        result = await self._session.execute(
+            select(SessionModel).where(SessionModel.impersonation_id == impersonation_id)
+        )
+        for record in result.scalars().all():
+            record.impersonation_id = None
+        await self._session.flush()

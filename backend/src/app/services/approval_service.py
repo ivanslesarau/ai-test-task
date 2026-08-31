@@ -261,9 +261,7 @@ class ApprovalService:
         await self._notify_decision(resolved, decision="denied")
         return await self._to_out(resolved)
 
-    async def request_info(
-        self, user_id: str, request_id: str, *, note: str
-    ) -> ApprovalRequestOut:
+    async def request_info(self, user_id: str, request_id: str, *, note: str) -> ApprovalRequestOut:
         """Moves to `info_requested`, a live status — `expires_at` is
         never touched (FR-155's last sentence, research.md R-43)."""
         request = await self._require_parent_owned(user_id, request_id)

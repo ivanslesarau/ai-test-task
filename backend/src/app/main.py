@@ -9,7 +9,9 @@ from app.api.v1 import (
     admin_users_router,
     approvals_router,
     auth_router,
+    coach_invitations_router,
     family_router,
+    impersonations_router,
     join_router,
     me_router,
     media_router,
@@ -23,9 +25,14 @@ from app.core.errors import (
     ApprovalKindNotExecutable,
     ApprovalSubjectUnavailable,
     ChildMustAskParent,
+    CoachAddressMismatch,
+    CoachAlreadyAssigned,
+    CoachInvitationPending,
     Conflict,
+    ImpersonationNotPermitted,
     InvalidCredentials,
     InvitationLinkInvalid,
+    InvitationNotResendable,
     InvitationNotUsable,
     NotAuthenticated,
     NotFound,
@@ -36,6 +43,7 @@ from app.core.errors import (
     PossibleDuplicateProfile,
     RateLimited,
     RequestAlreadyResolved,
+    RoleCannotAccept,
     RoleCannotJoin,
     StaleVersion,
     UnsupportedMediaType,
@@ -192,6 +200,43 @@ def create_app() -> FastAPI:
     async def _approval_amount_changed(_: Request, exc: ApprovalAmountChanged) -> JSONResponse:
         return JSONResponse(status_code=422, content=_error("approval_amount_changed", exc.message))
 
+    # --- Extension (2026-08-28): coach invitations, availability, ---------
+    # impersonation (specs/002-coach-availability-impersonation)
+
+    @app.exception_handler(CoachInvitationPending)
+    async def _coach_invitation_pending(_: Request, exc: CoachInvitationPending) -> JSONResponse:
+        body = _error("coach_invitation_pending", exc.message)
+        body["error"]["invitation"] = exc.invitation
+        return JSONResponse(status_code=409, content=body)
+
+    @app.exception_handler(InvitationNotResendable)
+    async def _invitation_not_resendable(_: Request, exc: InvitationNotResendable) -> JSONResponse:
+        return JSONResponse(
+            status_code=422, content=_error("invitation_not_resendable", exc.message)
+        )
+
+    @app.exception_handler(CoachAddressMismatch)
+    async def _coach_address_mismatch(_: Request, exc: CoachAddressMismatch) -> JSONResponse:
+        return JSONResponse(
+            status_code=403, content=_error("coach_invitation_address_mismatch", exc.message)
+        )
+
+    @app.exception_handler(RoleCannotAccept)
+    async def _role_cannot_accept(_: Request, exc: RoleCannotAccept) -> JSONResponse:
+        return JSONResponse(status_code=403, content=_error("role_cannot_accept", exc.message))
+
+    @app.exception_handler(CoachAlreadyAssigned)
+    async def _coach_already_assigned(_: Request, exc: CoachAlreadyAssigned) -> JSONResponse:
+        return JSONResponse(status_code=409, content=_error("coach_already_assigned", exc.message))
+
+    @app.exception_handler(ImpersonationNotPermitted)
+    async def _impersonation_not_permitted(
+        _: Request, exc: ImpersonationNotPermitted
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422, content=_error("impersonation_not_permitted", exc.message)
+        )
+
     @app.exception_handler(RequestValidationError)
     async def _request_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
         """Pydantic-level request parsing errors (malformed email, missing
@@ -235,6 +280,8 @@ def create_app() -> FastAPI:
     app.include_router(trainer_router.router, prefix="/api/v1")
     app.include_router(family_router.router, prefix="/api/v1")
     app.include_router(approvals_router.router, prefix="/api/v1")
+    app.include_router(coach_invitations_router.router, prefix="/api/v1")
+    app.include_router(impersonations_router.router, prefix="/api/v1")
 
     return app
 

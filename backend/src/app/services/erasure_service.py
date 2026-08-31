@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.core.errors import ActionNotPermitted, NotFound
 from app.db.base import utcnow
 from app.models.enums import AccountStatus, PlayerProfileKind, UserRole, is_transition_allowed
@@ -8,6 +9,7 @@ from app.models.user import User
 from app.repositories.active_training_context_repository import ActiveTrainingContextRepository
 from app.repositories.approval_repository import ApprovalRepository
 from app.repositories.audit_repository import AuditRepository
+from app.repositories.availability_repository import AvailabilityRepository
 from app.repositories.erasure_repository import ErasureRepository
 from app.repositories.invitation_repository import InvitationRepository
 from app.repositories.player_profile_repository import PlayerProfileRepository
@@ -15,6 +17,7 @@ from app.repositories.session_repository import SessionRepository
 from app.repositories.share_link_repository import ShareLinkRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.admin_user import AuditActorOut, ErasureRecordOut, UserDetail
+from app.services.impersonation_service import ImpersonationService
 from app.services.ports.photo_storage import PhotoStorage, thumbnail_key_for
 from app.services.user_admin_service import UserAdminService
 
@@ -34,6 +37,7 @@ class ErasureService:
         db_session: AsyncSession,
         photo_storage: PhotoStorage,
         admin_service: UserAdminService,
+        settings: Settings,
     ) -> None:
         self._users = UserRepository(db_session)
         self._sessions = SessionRepository(db_session)
@@ -44,6 +48,8 @@ class ErasureService:
         self._profiles = PlayerProfileRepository(db_session)
         self._contexts = ActiveTrainingContextRepository(db_session)
         self._approvals = ApprovalRepository(db_session)
+        self._availability = AvailabilityRepository(db_session)
+        self._impersonation = ImpersonationService(db_session, settings)
         self._photo_storage = photo_storage
         self._admin_service = admin_service
 
@@ -107,6 +113,10 @@ class ErasureService:
 
         await self._sessions.revoke_all_for_user(user.id)
         await self._invitations.supersede_outstanding_for_user(user.id)
+        # data-model.md §114, FR-039, FR-050, FR-055: ends any open
+        # impersonation of the erased account as `target_erased`, while
+        # keeping the history row forever.
+        await self._impersonation.close_for_erased_account(user.id)
 
         if user.role_enum is UserRole.PLAYER_PARENT:
             # Every signed-in account — the parent and each child sign-in
@@ -167,6 +177,12 @@ class ErasureService:
             detail.credentials = None
             detail.certifications = None
             detail.is_publicly_visible = False
+            # data-model.md §114, FR-039: an erased account's stated times
+            # go with it — a coach's `availability_updated_at` stamp is
+            # left as the (now meaningless) record that times once
+            # existed, exactly as a removed profile's is (research.md
+            # R2-13); only the rows are deleted.
+            await self._availability.delete_for_owner(coach_user_id=user.id)
         elif role is UserRole.PLAYER_PARENT:
             if isinstance(detail, ParentContact):
                 detail.emergency_contact_name = None
@@ -203,6 +219,12 @@ class ErasureService:
                 # user_profiles row instead.
                 player_profile.first_name = "Deleted"
                 player_profile.last_name = "User"
+
+            # data-model.md §114, FR-039: every profile this account
+            # owns loses its stated times along with the rest of its
+            # identifying data — an erased account's availability must
+            # not survive it, live or already soft-removed.
+            await self._availability.delete_for_owner(profile_id=player_profile.id)
 
             if player_profile.photo_key:
                 await self._photo_storage.delete(player_profile.photo_key)

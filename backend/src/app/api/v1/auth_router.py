@@ -5,10 +5,12 @@ from fastapi import APIRouter, Cookie, Request, Response
 from app.core.deps import (
     AuthServiceDep,
     BrandingServiceDep,
-    CurrentUserDep,
+    ImpersonationServiceDep,
+    PrincipalDep,
     SettingsDep,
     TrainingContextServiceDep,
 )
+from app.core.principal import ImpersonationContext
 from app.models.enums import UserRole
 from app.models.user import User
 from app.schemas.auth import (
@@ -18,6 +20,7 @@ from app.schemas.auth import (
     SetupPasswordRequest,
 )
 from app.services.branding_service import BrandingService
+from app.services.impersonation_service import ImpersonationService
 from app.services.training_context_service import TrainingContextService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -43,6 +46,10 @@ async def _to_current_user(
     user: User,
     training_context_service: TrainingContextService,
     branding_service: BrandingService,
+    impersonation_service: ImpersonationService,
+    *,
+    real_user_id: str,
+    impersonation_context: ImpersonationContext | None,
 ) -> CurrentUser:
     photo_url = f"/media/photos/{user.profile.photo_key}" if user.profile.photo_key else None
 
@@ -68,6 +75,18 @@ async def _to_current_user(
 
     portal_branding = await branding_service.resolve_for_viewer(user)
 
+    # research.md R2-20: `impersonation` is the live block (present only
+    # while `impersonation_context` is set — i.e. the caller's session is
+    # currently riding one); `impersonation_ended` is derived from the
+    # real caller's most recently closed impersonation, independent of
+    # whether one is live right now.
+    impersonation = (
+        await impersonation_service.get_current(impersonation_context)
+        if impersonation_context is not None
+        else None
+    )
+    impersonation_ended = await impersonation_service.get_recently_ended(real_user_id)
+
     return CurrentUser(
         id=user.id,
         email=user.email,
@@ -81,6 +100,8 @@ async def _to_current_user(
         context_count=context_count,
         is_child_account=is_child_account,
         portal_branding=portal_branding,
+        impersonation=impersonation,
+        impersonation_ended=impersonation_ended,
     )
 
 
@@ -93,12 +114,25 @@ async def login(
     settings: SettingsDep,
     training_context_service: TrainingContextServiceDep,
     branding_service: BrandingServiceDep,
+    impersonation_service: ImpersonationServiceDep,
 ) -> CurrentUser:
     user, raw_token = await auth_service.sign_in(
         email=body.email, password=body.password, client_ip=_client_ip(request)
     )
     _set_session_cookie(response, token=raw_token, settings=settings)
-    return await _to_current_user(user, training_context_service, branding_service)
+    # A fresh sign-in always starts a brand-new session with no
+    # impersonation riding it (research.md R2-14); `impersonation_ended`
+    # is still resolved for this account in case it is a Super Admin
+    # returning within the 120-second notice window from a different
+    # session (research.md R2-20).
+    return await _to_current_user(
+        user,
+        training_context_service,
+        branding_service,
+        impersonation_service,
+        real_user_id=user.id,
+        impersonation_context=None,
+    )
 
 
 @router.post("/logout", status_code=204)
@@ -115,11 +149,23 @@ async def logout(
 
 @router.get("/session", response_model=CurrentUser)
 async def get_session(
-    user: CurrentUserDep,
+    principal: PrincipalDep,
     training_context_service: TrainingContextServiceDep,
     branding_service: BrandingServiceDep,
+    impersonation_service: ImpersonationServiceDep,
 ) -> CurrentUser:
-    return await _to_current_user(user, training_context_service, branding_service)
+    """FR-043, FR-044, FR-046. While an impersonation is live, `principal
+    .effective_user` is the impersonated person — every 1.2.0 field
+    describes them — and `principal.impersonation`/`real_user` supply the
+    two new blocks (research.md R2-14, R2-20)."""
+    return await _to_current_user(
+        principal.effective_user,
+        training_context_service,
+        branding_service,
+        impersonation_service,
+        real_user_id=principal.real_user.id,
+        impersonation_context=principal.impersonation,
+    )
 
 
 @router.get("/setup-password/{token}", response_model=InvitationCheckResponse)

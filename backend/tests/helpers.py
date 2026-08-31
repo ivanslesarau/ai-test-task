@@ -7,18 +7,20 @@ from app.db.base import new_uuid, utcnow
 from app.models.approval import APPROVAL_REQUEST_TTL_HOURS, ApprovalRequest
 from app.models.association import TrainerPlayerAssociation
 from app.models.auth import Session as SessionModel
+from app.models.coach_invitation import CoachInvitation
 from app.models.enums import (
     AccountStatus,
     ApprovalRequestKind,
     ApprovalRequestStatus,
     AssociationStatus,
+    CoachInvitationState,
     Gender,
     PlayerProfileKind,
     ShareLinkKind,
     UserRole,
 )
 from app.models.player_profile import PlayerProfile
-from app.models.role_details import ParentContact, TrainerOrganization
+from app.models.role_details import CoachDetail, ParentContact, TrainerOrganization
 from app.models.share_link import ShareLink
 from app.models.user import User, UserProfile
 
@@ -279,3 +281,79 @@ async def create_approval_request(
     db_session.add(request)
     await db_session.flush()
     return request
+
+
+async def create_coach_invitation(
+    db_session: AsyncSession,
+    *,
+    trainer: User,
+    invited_email: str = "prospect@example.org",
+    invitee_name: str | None = None,
+    message: str | None = None,
+    expires_at: datetime | None = None,
+    state: CoachInvitationState = CoachInvitationState.AWAITING,
+) -> tuple[CoachInvitation, str]:
+    """A `coach_invitations` row plus the raw token that hashes to
+    `token_hash` (extension 2026-08-28, US2) — since only the hash is
+    ever stored (research.md R2-02), a test that needs to call
+    `GET/POST /coach-invitations/{token}...` must create the row this way
+    rather than through the trainer-issuing endpoint, whose JSON response
+    never carries the raw token either."""
+    raw_token = generate_token()
+    now = utcnow()
+    invitation = CoachInvitation(
+        id=new_uuid(),
+        trainer_user_id=trainer.id,
+        created_by_user_id=trainer.id,
+        token_hash=hash_token(raw_token),
+        invited_email=invited_email.lower(),
+        invitee_name=invitee_name,
+        message=message,
+        state=state.value,
+        issued_at=now,
+        expires_at=expires_at or (now + timedelta(days=7)),
+        accepted_by_user_id=None,
+        accepted_at=None,
+        revoked_at=None,
+        superseded_at=None,
+        superseded_by_id=None,
+        blocked_at=None,
+        blocked_reason=None,
+    )
+    db_session.add(invitation)
+    await db_session.flush()
+    return invitation, raw_token
+
+
+async def create_coach(
+    db_session: AsyncSession,
+    *,
+    email: str | None = None,
+    status: AccountStatus = AccountStatus.ACTIVE,
+    trainer_user_id: str | None = None,
+    joined_at: datetime | None = None,
+    first_name: str = "Cody",
+    last_name: str = "Coach",
+) -> User:
+    """A Coach account with its `coach_details` row (extension
+    2026-08-28, US2). `trainer_user_id`/`joined_at` pre-assign the coach
+    to a roster when given — both `None` (the default) leaves the coach
+    on no roster, exactly as a freshly-registered coach starts."""
+    coach = await create_user(
+        db_session,
+        role=UserRole.COACH,
+        status=status,
+        email=email,
+        first_name=first_name,
+        last_name=last_name,
+    )
+    db_session.add(
+        CoachDetail(
+            user_id=coach.id,
+            is_publicly_visible=False,
+            trainer_user_id=trainer_user_id,
+            joined_at=joined_at,
+        )
+    )
+    await db_session.flush()
+    return coach

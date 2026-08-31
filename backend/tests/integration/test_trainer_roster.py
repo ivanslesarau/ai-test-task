@@ -66,6 +66,11 @@ async def test_response_names_nothing_about_other_trainers(
         "joined_at",
         "photo_url",
         "responsible_contact",
+        # US5 (T607): the profile's stated week, embedded so the roster
+        # renders it without one request per row (research.md R2-12) —
+        # not a leak, since it names only this profile's own times.
+        "availability",
+        "availability_updated_at",
     }
     assert "id" not in body["items"][0]["responsible_contact"]
 

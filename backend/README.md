@@ -1,10 +1,16 @@
 # PracticePerfect API
 
-FastAPI + SQLAlchemy 2.0 (async) + SQLite backend for user roles, authorization, and Super Admin
-user management (feature `001-user-roles-admin`). See
-`../specs/001-user-roles-admin/` for the spec, plan, data model, and API contract this code
-implements, and `../specs/001-user-roles-admin/quickstart.md` for the full scenario-by-scenario
-validation walkthrough.
+FastAPI + SQLAlchemy 2.0 (async) + SQLite backend implementing Epic-01 in full, across two features:
+
+- `001-user-roles-admin` — user roles, authorization, Super Admin management, ShareLink onboarding,
+  multi-trainer association, portal branding, and parent/child family accounts. See
+  `../specs/001-user-roles-admin/`.
+- `002-coach-availability-impersonation` — coach invitations, weekly availability ("My Times") for
+  coaches and player profiles, and Super Admin impersonation. See
+  `../specs/002-coach-availability-impersonation/`.
+
+Each feature's directory holds its own spec, plan, data model, and API contract, and its own
+`quickstart.md` with the full scenario-by-scenario validation walkthrough.
 
 ## Setup
 
@@ -14,7 +20,7 @@ Requires Python 3.13+.
 cd backend
 uv sync                          # or: python -m venv .venv && pip install -e ".[dev]"
 cp .env.example .env             # then edit — see Environment variables below
-uv run alembic upgrade head      # creates the SQLite file and all 12 tables
+uv run alembic upgrade head      # creates the SQLite file and all 19 tables
 uv run python -m app.cli bootstrap-superadmin   # the only account that cannot be created via the API
 uv run python -m app.cli seed-demo-trainer      # a Trainer with a printed join URL, for testing US6 locally
 uv run uvicorn app.main:app --reload --port 8000
@@ -43,6 +49,8 @@ production. See `.env.example` for the full list with example values:
 | `SMTP_TIMEOUT_SECONDS` | Connection timeout for the SMTP sender; default `10` |
 | `FRONTEND_BASE_URL` | Used to build links in outgoing email and for CORS |
 | `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD` | Read only by the `bootstrap-superadmin` CLI command, never by the API |
+| `COACH_INVITATION_TTL_DAYS` | Feature 002. How long a coach invitation stays usable (FR-002) |
+| `IMPERSONATION_MAX_MINUTES` | Feature 002. The impersonation ceiling, enforced on read rather than by a scheduler (FR-046, research.md R2-19) |
 
 ## Architecture
 
@@ -90,10 +98,34 @@ Three rules a contributor touching this code must know, argued in full in
   must render every logo through `<img>` only, never `<object>`/`<embed>`/inline SVG. A second CI
   check greps for that.
 
-`FR-101`'s promise that a trainer's branding reaches their coaches is **not fully implemented**:
-which trainer a coach works for is US-01.08, out of scope for this feature, so a coach currently
-sees the platform default. `services/branding_service.py::resolve_for_viewer` carries a
-`TODO(US-01.08)` at the exact line that changes once that link exists.
+`FR-101`'s promise that a trainer's branding reaches their coaches is implemented as of feature 002:
+`services/branding_service.py::resolve_for_viewer`'s Coach branch resolves the assigned trainer's
+branding through `coach_details.trainer_user_id`, falling back to the platform default for a coach
+on no roster (research.md R2-06).
+
+## Extension (2026-08-28): coach invitations, availability, impersonation (feature 002)
+
+Three rules a contributor touching this code must know, argued in full in
+`../specs/002-coach-availability-impersonation/research.md`:
+
+- **Coach invitations are a dedicated, hashed-token table (`coach_invitations`), not a second
+  `ShareLinkKind`.** `share_links.code` is stored in clear on purpose (R-21); a coach invitation is a
+  single-use secret mailed to one named person, and its refusal policy — naming the address it was
+  issued for — is the opposite of a `ShareLink`'s uniform, non-disclosing refusal (R2-01).
+- **Impersonation creates no second session.** The admin's own `sessions` row gains a nullable
+  `impersonation_id` pointer, and exactly one dependency — `core/deps.py::get_principal` — resolves
+  the effective caller for every existing and future endpoint (R2-14). `get_current_user` is a
+  one-line wrapper over it; do not add impersonation-specific branching anywhere else. The route that
+  exits an impersonation authorizes on the caller's *real* identity
+  (`get_real_admin_with_open_impersonation`), never `require_roles(SUPER_ADMIN)` — while
+  impersonating anyone but another Super Admin, the effective user fails that gate, which would lock
+  the admin inside the impersonation until the one-hour ceiling instead of letting them leave (R2-15).
+- **`audit_entries` must only ever be altered with plain `op.add_column`, never
+  `op.batch_alter_table`.** Alembic's SQLite batch mode recreates the table, which silently drops the
+  append-only triggers `0004_create_audit_and_erasure.py` installed — a trap revision
+  `0011_coach_invitations_availability_impersonation.py` documents inline and
+  `test_migration_0011.py::test_revision_0004_audit_triggers_survive_the_column_addition` guards
+  against (R2-17).
 
 ## Quality gates
 
@@ -105,4 +137,5 @@ uv run pytest
 ```
 
 Tests are organized under `tests/unit/`, `tests/integration/`, and `tests/contract/` (the latter
-diffs the generated OpenAPI schema against `specs/001-user-roles-admin/contracts/openapi.yaml`).
+diffs the generated OpenAPI schema against the union of both features' `contracts/openapi.yaml`
+files).

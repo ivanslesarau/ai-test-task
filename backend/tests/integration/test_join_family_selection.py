@@ -183,9 +183,7 @@ async def test_reopening_the_link_marks_joined_profiles_connected_and_unselectab
 
     # 13.6 — re-open the link: the two joined profiles show connected.
     preview = await app_client.get(f"/join/{link.code}")
-    by_id = {
-        p["player_profile_id"]: p for p in preview.json()["viewer"]["selectable_profiles"]
-    }
+    by_id = {p["player_profile_id"]: p for p in preview.json()["viewer"]["selectable_profiles"]}
     assert by_id[self_profile.id]["already_associated"] is True
     assert by_id[child_one.id]["already_associated"] is True
     assert by_id[child_two.id]["already_associated"] is False

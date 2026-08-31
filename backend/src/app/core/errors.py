@@ -162,3 +162,51 @@ class ApprovalAmountChanged(DomainError):
     """The amount shown to the parent at approval time no longer matches
     the amount recorded on the request (FR-152) — refused rather than
     charging a different figure than the one the parent saw."""
+
+
+# --- Extension (2026-08-28): coach invitations, availability, impersonation
+
+# See specs/002-coach-availability-impersonation/{data-model.md,
+# contracts/openapi.yaml}. Six new errors; each maps to exactly one status
+# code in main.py's exception handlers (409 / 422 / 403 / 403 / 409 / 422).
+
+
+class CoachInvitationPending(DomainError):
+    """FR-007: this trainer already holds a second `awaiting`-and-unexpired
+    invitation to the same address. Carries the existing invitation,
+    already serialized to the `CoachInvitation` shape, so the 409 body can
+    name it (contracts `CoachInvitationConflict`) — the same shape
+    `PossibleDuplicateProfile` uses for its own 409."""
+
+    def __init__(self, message: str, invitation: dict) -> None:
+        super().__init__(message)
+        self.invitation = invitation
+
+
+class InvitationNotResendable(DomainError):
+    """FR-005: a resend was attempted against an invitation that is not
+    `awaiting` or expired-`awaiting` — i.e. already accepted, revoked, or
+    superseded."""
+
+
+class CoachAddressMismatch(DomainError):
+    """FR-013: the signed-in account's email is not the address this
+    invitation was issued to. The message names the invited address, which
+    the holder of the mail already knows."""
+
+
+class RoleCannotAccept(DomainError):
+    """FR-014: the signed-in account's role is not Coach. No role is ever
+    changed by following the link."""
+
+
+class CoachAlreadyAssigned(DomainError):
+    """FR-015: this coach already works with a trainer. The message and
+    body MUST name no trainer (SC-003) — the invitation is not spent and
+    stays usable."""
+
+
+class ImpersonationNotPermitted(DomainError):
+    """FR-042: the impersonation target is another Super Admin, the caller
+    themselves, or an account whose personal information has been
+    erased."""

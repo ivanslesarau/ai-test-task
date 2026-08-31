@@ -1,8 +1,15 @@
 # PracticePerfect Web
 
-React (Vite) + TypeScript frontend for user roles, authorization, and Super Admin user management
-(feature `001-user-roles-admin`). See `../specs/001-user-roles-admin/contracts/frontend-contracts.md`
-for the routes, query keys, and Zod schemas this code implements.
+React (Vite) + TypeScript frontend implementing Epic-01 in full, across two features:
+
+- `001-user-roles-admin` — user roles, authorization, Super Admin management, ShareLink onboarding,
+  multi-trainer association, portal branding, and parent/child family accounts.
+- `002-coach-availability-impersonation` — coach invitations, weekly availability ("My Times") for
+  coaches and player profiles, and Super Admin impersonation.
+
+See each feature's own `contracts/frontend-contracts.md` for the routes, query keys, and Zod schemas
+that feature's slice implements — `../specs/001-user-roles-admin/contracts/frontend-contracts.md` and
+`../specs/002-coach-availability-impersonation/contracts/frontend-contracts.md`.
 
 ## Setup
 
@@ -83,6 +90,37 @@ follow, argued in `../specs/001-user-roles-admin/research.md` R-26 and R-27:
   `routes/__root.tsx`, which also carries `/login` and `/set-password`. A CI check greps for
   `<object|<embed|dangerouslySetInnerHTML` near any file mentioning "branding" and fails the build if
   one is found.
+
+## Extension (2026-08-28): coach invitations, availability, impersonation (feature 002)
+
+Three roles gain new reachable pages, argued in full in
+`../specs/002-coach-availability-impersonation/contracts/frontend-contracts.md`:
+
+- **Coach** — `/my-times` (their own stated week; the primary nav's `coach` case is no longer empty).
+- **Trainer** — `/trainer/coaches` (roster and invitations) and `/trainer/coaches/$coachUserId` (one
+  coach's full week, read-only, reached only as a roster-row action — not a nav entry, exactly like
+  `/admin/users/$userId`).
+- **Player/Parent** — `/availability`, shown to both the parent shape and the signed-in-child shape of
+  that role (unlike Approvals/Requests, which the child shape does not see).
+- **Super Admin** — `/admin/impersonations` (the append-only history).
+
+Conventions a contributor extending this slice must follow:
+
+- **One summary formatter.** `entities/availability/model/format-summary.ts` is the only place a day
+  name, a 12-hour clock, or the en-dash between a range's start and end is computed. The API always
+  returns structured `{day_of_week, start_minute, end_minute}` slots, never a pre-baked string — a
+  roster row's "Best times" cell and the full-week view read the same function, so they can never
+  disagree (research.md R2-12).
+- **`queryClient.clear()` on both impersonation boundaries.** Starting and ending an impersonation are
+  the only two places in the app permitted to clear the whole query cache — every cached response
+  belongs to the identity active before the switch, and leaving it in place would let a Super Admin's
+  directory page (or the impersonated person's own data) survive into the wrong portal
+  (`entities/impersonation/api/use-start-impersonation.ts`, `use-end-impersonation.ts`).
+- **Nothing about impersonation is inferred client-side.** The banner
+  (`widgets/impersonation-banner/`) renders purely from `session.impersonation` being non-null; its
+  countdown is decorative, and only the server, on the next request, actually ends an impersonation.
+  A session describing a Trainer is turned away from `/admin/users` by the same route guard that
+  turns away any Trainer — no impersonation-specific branching exists in any guard.
 
 ## Quality gates
 

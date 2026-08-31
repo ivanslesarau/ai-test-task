@@ -215,12 +215,15 @@ describe('AppShell', () => {
     expect(within(nav).getByRole('link', { name: 'Players' })).toBeInTheDocument()
   })
 
-  it('renders no primary nav for a Coach', async () => {
+  it('lists My Times in the primary nav for a Coach', async () => {
+    // Extension (2026-08-28, spec 002, US3): supersedes "renders no
+    // primary nav for a Coach" — the coach now has a page (FR-024).
     mockCoachSession()
     renderAt('/')
 
     await screen.findByText('Cody Coach')
-    expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument()
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    expect(within(nav).getByRole('link', { name: 'My Times' })).toBeInTheDocument()
   })
 
   it('lists Family in the primary nav for a Player/Parent', async () => {

@@ -195,6 +195,72 @@ RESTRICTED_ROUTES: list[RestrictedRoute] = [
         {UserRole.PLAYER_PARENT},
         json_body={"note": "matrix probe"},
     ),
+    # Extension (2026-08-28, spec 002) — US3/US4: a coach's own week is
+    # Coach-only at the role gate; a player profile's week is
+    # Player/Parent-only, with sibling/child-vs-parent scoping proven by
+    # FamilyService instead (test_availability_isolation.py,
+    # test_availability_family.py), exactly as the family routes above.
+    RestrictedRoute("GET", "/me/availability", {UserRole.COACH}),
+    RestrictedRoute(
+        "PUT",
+        "/me/availability",
+        {UserRole.COACH},
+        json_body={"slots": []},
+    ),
+    RestrictedRoute("DELETE", "/me/availability", {UserRole.COACH}),
+    RestrictedRoute("GET", "/me/players/{profile_id}/availability", {UserRole.PLAYER_PARENT}),
+    RestrictedRoute(
+        "PUT",
+        "/me/players/{profile_id}/availability",
+        {UserRole.PLAYER_PARENT},
+        json_body={"slots": []},
+    ),
+    RestrictedRoute("DELETE", "/me/players/{profile_id}/availability", {UserRole.PLAYER_PARENT}),
+    # Extension (2026-08-28, spec 002) — US1: a trainer's own coach
+    # invitations are Trainer-only at the role gate; ownership scoping
+    # (another trainer's invitation is a 404) is proven separately by
+    # test_coach_invite_isolation.py, exactly as the family routes above.
+    RestrictedRoute("GET", "/trainer/coach-invitations", {UserRole.TRAINER}),
+    RestrictedRoute(
+        "POST",
+        "/trainer/coach-invitations",
+        {UserRole.TRAINER},
+        json_body={"email": "matrix-probe@example.org"},
+    ),
+    RestrictedRoute(
+        "POST", "/trainer/coach-invitations/{invitation_id}/resend", {UserRole.TRAINER}
+    ),
+    RestrictedRoute(
+        "POST", "/trainer/coach-invitations/{invitation_id}/revoke", {UserRole.TRAINER}
+    ),
+    # Extension (2026-08-28, spec 002) — US2: a trainer's own coach roster
+    # is Trainer-only at the role gate; ownership scoping (another
+    # trainer's coach is a 404) is proven separately by
+    # test_coach_roster.py, exactly as the family routes above.
+    RestrictedRoute("GET", "/trainer/coaches", {UserRole.TRAINER}),
+    RestrictedRoute("DELETE", "/trainer/coaches/{coach_user_id}", {UserRole.TRAINER}),
+    # Extension (2026-08-28, spec 002) — US5: a trainer's read of stated
+    # times is Trainer-only at the role gate; ownership scoping (another
+    # trainer's coach, or a profile with no Active association, is a 404)
+    # is proven separately by test_availability_trainer_isolation.py,
+    # exactly as the family routes above.
+    RestrictedRoute("GET", "/trainer/coaches/{coach_user_id}/availability", {UserRole.TRAINER}),
+    RestrictedRoute("GET", "/trainer/players/{profile_id}/availability", {UserRole.TRAINER}),
+    # Extension (2026-08-28, spec 002) — US6: starting an impersonation is
+    # Super-Admin-only at an ordinary `require_roles` gate, so it fits this
+    # table exactly. `DELETE /admin/impersonations/current` deliberately
+    # does NOT — research.md R2-15 — and is excluded below with its own
+    # dedicated coverage instead (see `_REAL_IDENTITY_ROUTES`).
+    RestrictedRoute(
+        "POST",
+        "/admin/impersonations",
+        {UserRole.SUPER_ADMIN},
+        json_body={"user_id": "nonexistent"},
+    ),
+    # Extension (2026-08-28, spec 002) — US7: the append-only impersonation
+    # history is Super-Admin-only at an ordinary `require_roles` gate
+    # (FR-056), unlike the exit route above.
+    RestrictedRoute("GET", "/admin/impersonations", {UserRole.SUPER_ADMIN}),
 ]
 
 
@@ -363,9 +429,36 @@ def test_every_admin_route_is_present_in_the_matrix() -> None:
     assert discovered, "no /admin routes were discovered — the discovery mechanism is broken"
 
     covered = {(r.method, r.path_template.removeprefix("/admin")) for r in RESTRICTED_ROUTES}
+    covered |= {(method, path.removeprefix("/admin")) for method, path in _REAL_IDENTITY_ROUTES}
 
     missing = discovered - covered
     assert not missing, f"/admin routes with no permission-matrix entry: {missing}"
+
+
+# Extension (2026-08-28, spec 002) — US6, research.md R2-15:
+# `DELETE /admin/impersonations/current` authorizes on the caller's REAL
+# identity, not a role — it is reachable by every role, and refuses with
+# 404 ("no impersonation in progress") rather than 403 for anyone who
+# isn't a Super Admin holding one open. It therefore does not fit this
+# table's binary allowed-roles/403 model and is proven directly by
+# test_impersonation_exit_timeout.py and test_every_non_admin_role_gets_404_
+# not_403_from_the_exit_route below instead.
+_REAL_IDENTITY_ROUTES = {("DELETE", "/admin/impersonations/current")}
+
+
+@pytest.mark.parametrize("role", [UserRole.TRAINER, UserRole.COACH, UserRole.PLAYER_PARENT])
+async def test_every_non_admin_role_gets_404_not_403_from_the_exit_route(
+    app_client: AsyncClient, db_session: AsyncSession, role: UserRole
+) -> None:
+    """research.md R2-15: the exit route is not a role gate, so a caller
+    who is not a Super Admin (and so can never hold an open impersonation)
+    is refused with the same 404 an admin with nothing to exit gets — not
+    the 403 every other restricted route in this file returns."""
+    await _sign_in_as(db_session, app_client, role)
+
+    response = await app_client.delete("/admin/impersonations/current")
+
+    assert response.status_code == 404
 
 
 # Extension (2026-08-26): role-agnostic routes every signed-in person may

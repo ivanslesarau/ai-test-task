@@ -35,12 +35,16 @@ def is_transition_allowed(current: AccountStatus, target: AccountStatus) -> bool
 
 
 class ShareLinkKind(StrEnum):
-    """Only PLAYER_STANDING is issued by this feature (FR-072). The
-    single-use coach variety is declared so US-01.08 is additive rather
-    than a restructuring — no row of that kind exists yet."""
+    """Only PLAYER_STANDING is ever issued (FR-072). Coach invitations do
+    NOT use this table or this enum: they live in their own
+    `coach_invitations` table (`app.models.coach_invitation`), because the
+    two secrets have opposite security postures and opposite disclosure
+    rules (data-model.md §109.4, research.md R2-01). A `COACH_SINGLE_USE`
+    member used to be declared here as a forward reference for US-01.08;
+    it is removed now that US-01.08 has chosen a dedicated table instead —
+    no row of that kind was ever written."""
 
     PLAYER_STANDING = "player_standing"
-    COACH_SINGLE_USE = "coach_single_use"
 
 
 class AssociationStatus(StrEnum):
@@ -142,3 +146,67 @@ def is_approval_transition_allowed(
     current: ApprovalRequestStatus, target: ApprovalRequestStatus
 ) -> bool:
     return (current, target) in ALLOWED_APPROVAL_TRANSITIONS
+
+
+# --- Extension (2026-08-28): coach invitations, availability, impersonation
+
+
+class CoachInvitationState(StrEnum):
+    """The four **event-driven** states a coach invitation stores
+    (data-model.md §109.1, research.md R2-03). `expired` is deliberately
+    absent — it is derived at read time from `expires_at` when the state
+    is AWAITING, because there is no scheduler to write it. `blocked` is
+    also absent — it is a pair of nullable columns
+    (`blocked_at`/`blocked_reason`) on a row that stays AWAITING, so a
+    refused acceptance does not spend the invitation (FR-015)."""
+
+    AWAITING = "awaiting"
+    ACCEPTED = "accepted"
+    REVOKED = "revoked"
+    SUPERSEDED = "superseded"
+
+
+# Permitted transitions (data-model.md §109.1). Nothing leaves a terminal
+# state, and there is no AWAITING -> AWAITING self-transition: setting or
+# clearing a block writes blocked_at/blocked_reason without touching state.
+ALLOWED_COACH_INVITATION_TRANSITIONS: frozenset[
+    tuple[CoachInvitationState, CoachInvitationState]
+] = frozenset(
+    {
+        (CoachInvitationState.AWAITING, CoachInvitationState.ACCEPTED),
+        (CoachInvitationState.AWAITING, CoachInvitationState.REVOKED),
+        (CoachInvitationState.AWAITING, CoachInvitationState.SUPERSEDED),
+    }
+)
+
+
+def is_coach_invitation_transition_allowed(
+    current: CoachInvitationState, target: CoachInvitationState
+) -> bool:
+    return (current, target) in ALLOWED_COACH_INVITATION_TRANSITIONS
+
+
+class CoachInvitationBlockReason(StrEnum):
+    """Why an acceptance was refused without spending the invitation
+    (data-model.md §109.2). Two values only, because FR-019 requires the
+    trainer to learn *that* acceptance was blocked while learning nothing
+    about the other trainer — the reason shown is a fixed phrase per
+    value, and the other trainer's identity is never stored here."""
+
+    ROLE_NOT_COACH = "role_not_coach"
+    ALREADY_ASSIGNED = "already_assigned"
+
+
+class ImpersonationEndReason(StrEnum):
+    """Why an impersonation session ended (data-model.md §109.3, FR-045 –
+    FR-050). The first two are enforced at request time in `get_principal`
+    (research.md R2-19); the rest are written by the action that caused
+    them."""
+
+    EXITED = "exited"
+    TIMED_OUT = "timed_out"
+    SIGNED_OUT = "signed_out"
+    SUPERSEDED = "superseded"
+    TARGET_DEACTIVATED = "target_deactivated"
+    TARGET_ERASED = "target_erased"
+    ADMIN_DEACTIVATED = "admin_deactivated"

@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 
 from app.models.enums import PlayerProfileKind
+from app.schemas.availability import AvailabilitySlotModel
 
 
 class ResponsibleContact(BaseModel):
@@ -26,7 +27,11 @@ class TrainerPlayerSummary(BaseModel):
     **Changed in 1.2.0** (data-model.md §35, research.md R-49): names a
     player profile rather than an account — `player_user_id` is gone —
     and carries the responsible adult's contact detail, since a trainer
-    with a child on their roster must be able to reach the parent."""
+    with a child on their roster must be able to reach the parent.
+
+    **Changed in 1.3.0** (US5, FR-020, FR-034, research.md R2-12): carries
+    the profile's stated slots and their revision date, populated from
+    one `IN` query for the whole page — never one request per row."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -38,6 +43,8 @@ class TrainerPlayerSummary(BaseModel):
     joined_at: datetime
     photo_url: str | None
     responsible_contact: ResponsibleContact
+    availability: list[AvailabilitySlotModel]
+    availability_updated_at: datetime | None
 
 
 class TrainerPlayerPage(BaseModel):

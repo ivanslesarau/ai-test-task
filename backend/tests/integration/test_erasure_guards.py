@@ -43,7 +43,7 @@ async def test_erasing_the_only_active_super_admin_is_refused(db_session: AsyncS
         db_session, settings, FilesystemEmailSender(settings.email_outbox_dir)
     )
     erasure_service = ErasureService(
-        db_session, get_photo_storage(settings.upload_dir), admin_service
+        db_session, get_photo_storage(settings.upload_dir), admin_service, settings
     )
 
     with pytest.raises(ActionNotPermitted) as exc_info:

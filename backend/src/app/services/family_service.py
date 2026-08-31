@@ -20,6 +20,7 @@ from app.models.player_profile import PlayerProfile as PlayerProfileModel
 from app.models.role_details import TrainerOrganization
 from app.models.user import User
 from app.repositories.association_repository import AssociationRepository
+from app.repositories.availability_repository import AvailabilityRepository
 from app.repositories.player_profile_repository import PlayerProfileRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
@@ -78,6 +79,7 @@ class FamilyService:
         self._associations = AssociationRepository(db_session)
         self._users = UserRepository(db_session)
         self._sessions = SessionRepository(db_session)
+        self._availability = AvailabilityRepository(db_session)
         self._share_links = share_links
 
     # --- reachability (research.md R-48) --------------------------------
@@ -101,6 +103,19 @@ class FamilyService:
         if profile.account_user_id != user.id:
             raise PlayerProfileNotFound("No such player profile.")
         return profile
+
+    async def resolve_reachable_profile_id(self, user: User, profile_id: str) -> str:
+        """The one thing `/me/players/{profile_id}/availability` needs
+        from this service (research.md R2-11, data-model.md §111.2's
+        `AvailabilityService` deliberately does no authorization of its
+        own): confirms the caller may reach this profile — a parent to
+        any of their own, or a signed-in child to their own — raising
+        `PlayerProfileNotFound` (404, never 403) otherwise, exactly as
+        every other `/me/players/{profile_id}` route already behaves.
+        Returns the id only; the availability endpoints have no further
+        use for the profile row itself."""
+        profile = await self._resolve_reachable(user, profile_id)
+        return profile.id
 
     # --- reads ------------------------------------------------------------
 
@@ -283,6 +298,13 @@ class FamilyService:
                     target_status=AccountStatus.INACTIVE,
                     expected_version=child_user.version,
                 )
+
+        # data-model.md §114, FR-039: a removed profile's stated times must
+        # not survive it — no route may still return them. The
+        # `availability_updated_at` stamp on the profile row itself is left
+        # as-is (removal is soft; the row and its history persist), only
+        # the slot rows are deleted, in this same transaction.
+        await self._availability.delete_for_owner(profile_id=profile.id)
 
         await self._profiles.soft_remove(profile)
 

@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, UploadFile
 
 from app.core.deps import (
+    AvailabilityServiceDep,
     BrandingServiceDep,
     CurrentUserDep,
     ProfileServiceDep,
@@ -12,6 +13,7 @@ from app.core.deps import (
 )
 from app.models.enums import UserRole
 from app.models.user import User
+from app.schemas.availability import AvailabilityWeekOut, AvailabilityWeekUpdate
 from app.schemas.branding import PortalBranding, PortalBrandingUpdate
 from app.schemas.profile import OwnProfile, OwnProfileUpdate, PhotoUrls
 from app.schemas.share_link import ShareLinkOut
@@ -20,6 +22,7 @@ from app.schemas.training_context import TrainingContextList, TrainingContextReq
 router = APIRouter(prefix="/me", tags=["me"])
 
 TrainerOnlyDep = Annotated[User, Depends(require_roles(UserRole.TRAINER))]
+CoachOnlyDep = Annotated[User, Depends(require_roles(UserRole.COACH))]
 PlayerParentOnlyDep = Annotated[User, Depends(require_roles(UserRole.PLAYER_PARENT))]
 
 
@@ -132,3 +135,33 @@ async def reset_own_branding(
     user: TrainerOnlyDep, branding_service: BrandingServiceDep
 ) -> PortalBranding:
     return await branding_service.reset(user)
+
+
+# --- Extension (2026-08-28): a coach's own weekly availability (US3) --------
+
+
+@router.get("/availability", response_model=AvailabilityWeekOut)
+async def get_own_availability(
+    user: CoachOnlyDep, availability_service: AvailabilityServiceDep
+) -> AvailabilityWeekOut:
+    """Never-stated returns `slots: [], updated_at: null` (FR-035) — there
+    is nothing to distinguish "no rows yet" from any other read."""
+    return await availability_service.get_week(coach_user_id=user.id)
+
+
+@router.put("/availability", response_model=AvailabilityWeekOut)
+async def replace_own_availability(
+    body: AvailabilityWeekUpdate, user: CoachOnlyDep, availability_service: AvailabilityServiceDep
+) -> AvailabilityWeekOut:
+    """Whole-week replace, validated before anything is written (FR-027,
+    FR-029) — a refused save leaves the previous week exactly as it was."""
+    return await availability_service.replace_week(body, coach_user_id=user.id)
+
+
+@router.delete("/availability", status_code=204)
+async def clear_own_availability(
+    user: CoachOnlyDep, availability_service: AvailabilityServiceDep
+) -> None:
+    """Deliberately distinct from never-stated: `updated_at` is stamped
+    (FR-030, FR-032, FR-035)."""
+    await availability_service.clear_week(coach_user_id=user.id)

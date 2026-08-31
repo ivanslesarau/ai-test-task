@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type PendingActionKind = 'deactivate' | 'reactivate' | 'erase'
+export type PendingActionKind = 'deactivate' | 'reactivate' | 'erase' | 'impersonate'
 
 export interface PendingAction {
   kind: PendingActionKind

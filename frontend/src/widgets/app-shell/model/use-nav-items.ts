@@ -1,7 +1,10 @@
 import { useApprovals } from '@/entities/approval/api/use-approvals'
+import { impersonationHistorySearchSchema } from '@/entities/impersonation/model/history-search'
+import type { ImpersonationHistorySearch } from '@/entities/impersonation/model/history-search'
 import { useSession } from '@/entities/session/api/use-session'
 import {
   isChildAccount,
+  isCoach,
   isPlayerParent,
   isSuperAdmin,
   isTrainer,
@@ -32,19 +35,49 @@ export type NavItem =
   // since it has no session to read a count from.
   | (BaseNavItem & { to: '/approvals'; count?: number })
   | (BaseNavItem & { to: '/requests' })
+  // Extension (2026-08-28, spec 002): a coach's own week (FR-024) and a
+  // family's per-profile week (FR-025, FR-033).
+  | (BaseNavItem & { to: '/my-times' })
+  | (BaseNavItem & { to: '/availability' })
+  // Extension (2026-08-28, spec 002, US1): a trainer's coach invitations
+  // and roster (FR-001 – FR-010, FR-020, FR-021).
+  | (BaseNavItem & { to: '/trainer/coaches' })
+  // Extension (2026-08-28, spec 002, US7): the append-only impersonation
+  // history (FR-053, FR-054, FR-056).
+  | (BaseNavItem & { to: '/admin/impersonations'; search: ImpersonationHistorySearch })
 
 /** The directory's own default view — parsing `{}` reuses the same
  * `.catch()` fallbacks the route's `validateSearch` applies, so this can
  * never drift from what `/admin/users` renders with no query string. */
 const DIRECTORY_DEFAULT_SEARCH: DirectorySearch = directorySearchSchema.parse({})
 
+/** Same reasoning as `DIRECTORY_DEFAULT_SEARCH` above — reuses the
+ * route's own `.catch()` fallbacks so this can never drift from what
+ * `/admin/impersonations` renders with no query string. */
+const IMPERSONATIONS_DEFAULT_SEARCH: ImpersonationHistorySearch =
+  impersonationHistorySearchSchema.parse({})
+
 const SUPER_ADMIN_NAV_ITEMS: NavItem[] = [
   { key: 'admin-users', label: 'Users', to: '/admin/users', search: DIRECTORY_DEFAULT_SEARCH },
+  {
+    key: 'admin-impersonations',
+    label: 'Impersonation history',
+    to: '/admin/impersonations',
+    search: IMPERSONATIONS_DEFAULT_SEARCH,
+  },
 ]
 
 const TRAINER_NAV_ITEMS: NavItem[] = [
   { key: 'trainer-portal', label: 'Portal settings', to: '/trainer/portal' },
   { key: 'trainer-players', label: 'Players', to: '/trainer/players' },
+  { key: 'trainer-coaches', label: 'Coaches', to: '/trainer/coaches' },
+]
+
+// Extension (2026-08-28, spec 002, US3): a coach states their own weekly
+// availability at /my-times (FR-024) — this is the coach's page the
+// stale comment below used to say did not exist.
+const COACH_NAV_ITEMS: NavItem[] = [
+  { key: 'my-times', label: 'My Times', to: '/my-times' },
 ]
 
 // Extension (2026-08-27, family accounts, tasks.md T365, closed by
@@ -56,20 +89,24 @@ const TRAINER_NAV_ITEMS: NavItem[] = [
 // reachable for the entry-points regression test (a `player_parent`
 // account may be either shape). `useNavItems()` below is what actually
 // picks between the two for a live session, on `isChildAccount`.
+//
+// Extension (2026-08-28, spec 002, US4): Availability is listed here too
+// and, unlike Approvals/Requests, is shown to a signed-in child as well
+// as a parent (frontend-contracts.md §36) — a child may state their own
+// times (FR-033), so withholding the entry would hide a capability they
+// have. `useNavItems()` below filters Approvals/Requests by
+// `isChildAccount` but never filters Availability.
 const PLAYER_PARENT_NAV_ITEMS: NavItem[] = [
   { key: 'family', label: 'Family', to: '/family' },
   { key: 'approvals', label: 'Approvals', to: '/approvals' },
   { key: 'requests', label: 'Requests', to: '/requests' },
+  { key: 'availability', label: 'Availability', to: '/availability' },
 ]
 
 /**
  * Pure, role-keyed lookup — exported separately from the hook so a
  * regression test (`tests/routes/entry-points.test.tsx`) can enumerate
  * every role's reachable paths without rendering a component.
- *
- * `coach` deliberately resolves to an empty list: this feature gives it
- * no dedicated page beyond `/profile`, and a link to a page that does not
- * exist is worse than no link at all.
  */
 export function navItemsForRole(role: UserRole | undefined): NavItem[] {
   switch (role) {
@@ -80,6 +117,7 @@ export function navItemsForRole(role: UserRole | undefined): NavItem[] {
     case 'player_parent':
       return PLAYER_PARENT_NAV_ITEMS
     case 'coach':
+      return COACH_NAV_ITEMS
     case undefined:
       return []
   }
@@ -107,6 +145,7 @@ export function useNavItems(): NavItem[] {
 
   if (isSuperAdmin(user)) return navItemsForRole('super_admin')
   if (isTrainer(user)) return navItemsForRole('trainer')
+  if (isCoach(user)) return navItemsForRole('coach')
   if (isPlayerParent(user)) {
     // A parent sees Family and Approvals; a signed-in child sees Family
     // and Requests — never both Approvals and Requests, and never the

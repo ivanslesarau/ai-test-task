@@ -25,6 +25,20 @@ class Session(Base):
     expires_at: Mapped[datetime] = mapped_column(nullable=False, index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
+    # The open impersonation this session is currently riding (data-model.md
+    # §106, research.md R2-14). `NULL` for every ordinary session — this one
+    # nullable pointer is the whole live-state mechanism: no second session
+    # row and no second credential are ever created.
+    #
+    # Invariant maintained by the SERVICE, not the schema: a non-NULL value
+    # here always points at an `impersonation_sessions` row whose `ended_at
+    # IS NULL`. `get_principal` treats a pointer to a closed row as "not
+    # impersonating" and clears it, so a crash between the two writes
+    # degrades to the safe reading rather than to a stuck impersonation.
+    impersonation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("impersonation_sessions.id"), nullable=True
+    )
+
 
 class CredentialSetupInvitation(Base):
     """A single-use, time-limited permission to set a password

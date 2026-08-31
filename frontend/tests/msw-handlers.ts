@@ -33,6 +33,8 @@ export const fixtures = {
     context_count: 0,
     is_child_account: false,
     portal_branding: DEFAULT_BRANDING,
+    impersonation: null,
+    impersonation_ended: null,
   } satisfies CurrentUser,
 
   emptyContexts: {

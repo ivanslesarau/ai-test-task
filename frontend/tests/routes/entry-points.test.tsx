@@ -37,6 +37,10 @@ const ALLOW_LISTED_PATHS = new Set<string>([
   // entry point — same shape as '/admin/users/$userId' above (extension
   // 2026-08-27, tasks.md T364).
   '/family/$profileId',
+  // A coach roster row action (features/trainer/coaches/coach-roster-table),
+  // not a nav entry point — same shape as '/admin/users/$userId' above
+  // (US5, tasks.md T611).
+  '/trainer/coaches/$coachUserId',
 ])
 
 const ALL_ROLES: UserRole[] = ['super_admin', 'trainer', 'coach', 'player_parent']
@@ -69,5 +73,36 @@ describe('entry points', () => {
     })
 
     expect(unreachable).toEqual([])
+  })
+
+  // Extension (2026-08-28, spec 002, US3): `coach` used to resolve to an
+  // empty list — this feature gives it its own page (FR-024).
+  it("gives a coach a click path to My Times", () => {
+    const paths = navItemsForRole('coach').map((item) => item.to)
+    expect(paths).toContain('/my-times')
+  })
+
+  // Extension (2026-08-28, spec 002, US4): Availability is listed for
+  // `player_parent` unconditionally — both the parent shape and the
+  // signed-in-child shape of that role reach it (frontend-contracts.md
+  // §36), unlike Approvals/Requests, which `useNavItems()` filters by
+  // `isChildAccount` at render time.
+  it('gives both parent and child variants of player_parent a click path to Availability', () => {
+    const paths = navItemsForRole('player_parent').map((item) => item.to)
+    expect(paths).toContain('/availability')
+  })
+
+  // Extension (2026-08-28, spec 002, US1): a trainer's reachable-path set
+  // includes Coaches (FR-001 – FR-010, FR-020, FR-021).
+  it('gives a trainer a click path to Coaches', () => {
+    const paths = navItemsForRole('trainer').map((item) => item.to)
+    expect(paths).toContain('/trainer/coaches')
+  })
+
+  // Extension (2026-08-28, spec 002, US7): a Super Admin's reachable-path
+  // set includes the impersonation history (FR-053, FR-054, FR-056).
+  it('gives a Super Admin a click path to the impersonation history', () => {
+    const paths = navItemsForRole('super_admin').map((item) => item.to)
+    expect(paths).toContain('/admin/impersonations')
   })
 })

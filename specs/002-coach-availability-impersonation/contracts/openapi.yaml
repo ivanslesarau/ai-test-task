@@ -1,0 +1,1157 @@
+openapi: 3.1.0
+info:
+  title: PracticePerfect — Coach Invitations, Availability & Impersonation
+  version: 1.3.0
+  description: |
+    Contract for feature 002-coach-availability-impersonation. It is version **1.3.0** of the same
+    `/api/v1` contract feature 001 defined at 1.2.0, and it is **purely additive**: every operation
+    below is new, and the only changes to existing response models are new optional fields
+    (`CurrentUser.impersonation`, `CurrentUser.impersonation_ended`,
+    `TrainerPlayerSummary.availability`, `TrainerPlayerSummary.availability_updated_at`). No
+    operation is removed, and no existing field changes type or meaning, so the frontend compiled
+    against 1.2.0 keeps working until it chooses to read the new fields (research.md R2-22).
+
+    This file documents **only what 1.3.0 adds**. Operations defined in
+    `specs/001-user-roles-admin/contracts/openapi.yaml` are unchanged and not repeated here, with
+    the single exception of the two schema extensions above, which are given in full so the
+    frontend types have one authoritative source.
+
+    Three groups of operations:
+
+    * **Coach invitations** (`coach-invitations` tag, plus `/trainer/coach-invitations` and
+      `/trainer/coaches`) — a trainer invites a coach, tracks the invitation, and manages the
+      roster; the invited person previews, registers, or accepts. US-01.08, FR-001 – FR-023.
+    * **Availability** (`availability` tag) — a coach's own week, a player profile's week, and the
+      trainer's read-only view of both. US-01.09/US-01.10, FR-024 – FR-039.
+    * **Impersonation** (`impersonation` tag) — starting, leaving, and the append-only history.
+      US-01.07, FR-040 – FR-056.
+
+    Authentication is the same session cookie. Every error body is the one `Error` envelope
+    feature 001 defined; the schemas are referenced from that file rather than redefined.
+
+    Traceability: each operation carries `x-requirements` listing the requirements of
+    `specs/002-coach-availability-impersonation/spec.md` it satisfies.
+
+servers:
+  - url: /api/v1
+    description: Versioned API root
+
+tags:
+  - name: coach-invitations
+    description: The invited person's side — public preview, registration, acceptance
+  - name: trainer
+    description: A trainer's own organization — coach invitations, coach roster, player roster
+  - name: availability
+    description: Stated weekly availability ("My Times") and the trainer's read-only view of it
+  - name: impersonation
+    description: Super Admin impersonation and its append-only history
+  - name: auth
+    description: Session inspection — extended here with the live impersonation block
+
+security:
+  - sessionCookie: []
+
+paths:
+  # ==========================================================================
+  # Coach invitations — trainer side (FR-001 – FR-010, FR-020 – FR-023)
+  # ==========================================================================
+
+  /trainer/coach-invitations:
+    get:
+      tags: [trainer]
+      summary: List the coach invitations this trainer has issued
+      operationId: listCoachInvitations
+      x-requirements: [FR-004, FR-009]
+      description: |
+        Trainer only, scoped to the caller's own invitations with no parameter that could widen it.
+        Rows in the `superseded` state are never returned: a resend leaves one invitation per
+        address, not two (FR-005). `state` is the *presented* state, which folds in expiry and the
+        block annotation by the precedence in data-model.md §101.1 — a client never computes it.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: state
+          in: query
+          required: false
+          description: Optional filter on the presented state.
+          schema:
+            type: string
+            enum: [awaiting, accepted, expired, revoked, blocked]
+      responses:
+        '200':
+          description: One page of invitations, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoachInvitationPage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+    post:
+      tags: [trainer]
+      summary: Invite a coach by email address
+      operationId: issueCoachInvitation
+      x-requirements: [FR-001, FR-002, FR-003, FR-007, FR-008, FR-010, FR-023]
+      description: |
+        Issues a single-use invitation that stops working seven days after issue, and mails it to
+        the address with the trainer's name and brand and the personal message when one was given.
+
+        The response never reveals whether the address already holds an account (FR-008): the
+        outcome is identical either way, and every conflict that depends on the invited person's
+        account surfaces later, to that person, at acceptance.
+
+        Refused with `409 coach_invitation_pending` when this trainer already has an invitation to
+        the same address that is awaiting a response and not yet expired; the error body names the
+        existing invitation so the client can offer resend or revoke (FR-007). Refused with
+        `403 account_not_active` when the trainer's own account is not Active (FR-010).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CoachInvitationCreate' }
+      responses:
+        '201':
+          description: The invitation, as the trainer's list will show it.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoachInvitation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: An invitation to this address is already awaiting a response (FR-007).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoachInvitationConflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /trainer/coach-invitations/{invitation_id}/resend:
+    post:
+      tags: [trainer]
+      summary: Re-send an invitation, replacing it with a fresh one
+      operationId: resendCoachInvitation
+      x-requirements: [FR-005, FR-009, FR-010, FR-023]
+      description: |
+        Permitted while the invitation is awaiting a response or has expired. The current row is
+        marked `superseded` and a new seven-day invitation is issued to the same address in the same
+        transaction, so the previous link stops admitting anyone immediately and the trainer's list
+        still shows exactly one invitation for that address (FR-005).
+
+        The response is the **new** invitation. Refused with `422 invitation_not_resendable` for an
+        invitation that is accepted or revoked.
+      parameters:
+        - $ref: '#/components/parameters/CoachInvitationId'
+      responses:
+        '201':
+          description: The replacement invitation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoachInvitation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ActionNotPermitted' }
+
+  /trainer/coach-invitations/{invitation_id}/revoke:
+    post:
+      tags: [trainer]
+      summary: Revoke an invitation that is awaiting a response
+      operationId: revokeCoachInvitation
+      x-requirements: [FR-006, FR-009, FR-023]
+      description: |
+        After this, following the link is refused with a plain statement that it is no longer valid.
+        Refused with `422 invitation_not_revocable` for an invitation that is already accepted,
+        revoked, or expired — an expired invitation needs no revoking and saying so is clearer than
+        pretending the action did something.
+      parameters:
+        - $ref: '#/components/parameters/CoachInvitationId'
+      responses:
+        '200':
+          description: The invitation, now revoked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoachInvitation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ActionNotPermitted' }
+
+  /trainer/coaches:
+    get:
+      tags: [trainer]
+      summary: List the coaches on this trainer's roster
+      operationId: listTrainerCoaches
+      x-requirements: [FR-020, FR-034, FR-036]
+      description: |
+        Trainer only, scoped to the caller's own roster with no parameter that could widen it —
+        the same shape as `GET /trainer/players`. Each row carries the coach's stated week, so the
+        list can render the "Best times" summary without one request per row; the client formats the
+        summary from the structured slots (research.md R2-12).
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: q
+          in: query
+          required: false
+          description: Free-text filter on the coach's name or invited address.
+          schema: { type: string, maxLength: 200 }
+      responses:
+        '200':
+          description: One page of coaches.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrainerCoachPage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /trainer/coaches/{coach_user_id}:
+    delete:
+      tags: [trainer]
+      summary: End a coach's assignment to this trainer
+      operationId: endCoachAssignment
+      x-requirements: [FR-021, FR-022, FR-023]
+      description: |
+        The coach is on no roster afterwards, reaches none of this trainer's data, keeps their own
+        account, profile, and stated times, and is free to accept another trainer's invitation.
+        Idempotent in effect but not in status: a coach who is not on this trainer's roster is a
+        404, because the caller is naming a resource they do not have.
+      parameters:
+        - $ref: '#/components/parameters/CoachUserId'
+      responses:
+        '204': { description: The assignment has ended. }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ==========================================================================
+  # Coach invitations — invited person's side (FR-011 – FR-019)
+  # ==========================================================================
+
+  /coach-invitations/{token}:
+    get:
+      tags: [coach-invitations]
+      summary: Preview a coach invitation
+      operationId: previewCoachInvitation
+      security: []
+      x-requirements: [FR-011, FR-012, FR-013]
+      description: |
+        Public and unauthenticated: possession of the mailed token is the only credential, and it
+        was sent to the invited address. Per-origin throttled on the same counter and threshold the
+        player join-link lookup uses (research.md R2-05); a refused lookup counts against it.
+
+        `account_exists` tells the client whether to offer registration or sign-in. This is not the
+        enumeration FR-008 forbids — that rule protects the trainer from learning whether an address
+        is registered, and this response is gated on a 256-bit token mailed to that address.
+
+        Every unusable invitation — unknown token, spent, revoked, superseded, expired, or an
+        inviting trainer who is no longer Active — returns the same `404 invitation_link_invalid`
+        body, so a stranger cannot learn which condition applied.
+      parameters:
+        - $ref: '#/components/parameters/CoachInvitationToken'
+      responses:
+        '200':
+          description: What the invited person needs to decide, and nothing else.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoachInvitationPreview' }
+        '404': { $ref: '#/components/responses/InvitationLinkInvalid' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /coach-invitations/{token}/register:
+    post:
+      tags: [coach-invitations]
+      summary: Establish a coach account through an invitation and join the roster
+      operationId: registerThroughCoachInvitation
+      security: []
+      x-requirements: [FR-011, FR-013, FR-017, FR-018, FR-023]
+      description: |
+        For an invited person who holds no account. The email address is **not** in the request
+        body: it is taken from the invitation, which is what makes FR-013's address binding
+        unbreakable rather than checked. The role is Coach and the trainer is the inviting trainer;
+        neither is a parameter, because the invitation already determines both.
+
+        On success the invitation is spent, the coach is on the roster with `joined_at` set, and the
+        response sets the session cookie — the coach lands signed in, in a portal already carrying
+        the trainer's brand.
+
+        `409 email_already_registered` means an account exists at the invited address; the client
+        offers sign-in and `POST .../accept` instead.
+      parameters:
+        - $ref: '#/components/parameters/CoachInvitationToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CoachRegistrationRequest' }
+      responses:
+        '201':
+          description: The account was created, signed in, and placed on the roster.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoachJoinResult' }
+          headers:
+            Set-Cookie:
+              description: The session cookie for the new coach account.
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/InvitationLinkInvalid' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410':
+          description: The invitation was used while this request was in flight (FR-018).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /coach-invitations/{token}/accept:
+    post:
+      tags: [coach-invitations]
+      summary: Accept a coach invitation with an existing account
+      operationId: acceptCoachInvitation
+      x-requirements: [FR-012, FR-013, FR-014, FR-015, FR-016, FR-017, FR-018, FR-019, FR-023]
+      description: |
+        For a signed-in account. Four refusals, each with its own code so the client can say
+        something true:
+
+        * `403 coach_invitation_address_mismatch` — the account's address is not the invited one
+          (FR-013). The message names the address the invitation was issued for, which the holder of
+          the mail already knows.
+        * `403 role_cannot_accept` — the account's role is not Coach (FR-014). No role is ever
+          changed by following a link.
+        * `409 coach_already_assigned` — this coach already works with a trainer (FR-015). The
+          message and body name **no** trainer. The invitation is *not* spent and stays usable until
+          it expires, so a coach who later leaves that trainer can still accept it.
+        * `200 already_on_this_roster` — this coach is already on the inviting trainer's roster
+          (FR-016). Not an error: nothing changes and the response says so.
+
+        The two `403`/`409` refusals annotate the invitation as blocked, which is what the trainer
+        sees (FR-019); the annotation clears on a later successful acceptance.
+      parameters:
+        - $ref: '#/components/parameters/CoachInvitationToken'
+      responses:
+        '200':
+          description: |
+            The coach is on the roster. `outcome` distinguishes a fresh acceptance from FR-016's
+            no-op.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoachJoinResult' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403':
+          description: Address mismatch (FR-013) or a role that cannot accept (FR-014).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/InvitationLinkInvalid' }
+        '409':
+          description: This coach already works with a trainer (FR-015). Names no trainer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ==========================================================================
+  # Availability (FR-024 – FR-039)
+  # ==========================================================================
+
+  /me/availability:
+    get:
+      tags: [availability]
+      summary: Read the signed-in coach's own stated week
+      operationId: getOwnAvailability
+      x-requirements: [FR-024, FR-032, FR-033, FR-035]
+      description: |
+        Coach only. An account that has never stated times returns `slots: []` with
+        `updated_at: null` — "no times set", which FR-035 requires be distinguishable from
+        unavailable and from a week that was deliberately cleared (`slots: []` with a non-null
+        `updated_at`).
+      responses:
+        '200':
+          description: The coach's stated week.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AvailabilityWeek' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+    put:
+      tags: [availability]
+      summary: Replace the signed-in coach's stated week
+      operationId: replaceOwnAvailability
+      x-requirements: [FR-024, FR-026, FR-027, FR-028, FR-029, FR-032, FR-033]
+      description: |
+        Replaces the whole week in one transaction: the submitted set is validated in full before
+        any row is touched, so a refused save leaves the previous week exactly as it was and no week
+        is ever observable half-saved (FR-027, FR-029). Two concurrent saves resolve as
+        last-complete-save-wins; there is no version token to send.
+
+        `422` carries the offending **day** and the reason — overlapping ranges, a start at or after
+        its end, a range past the end of the day, or more than six ranges in a day.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AvailabilityWeekUpdate' }
+      responses:
+        '200':
+          description: The stored week, as saved.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AvailabilityWeek' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+    delete:
+      tags: [availability]
+      summary: Clear the signed-in coach's stated week
+      operationId: clearOwnAvailability
+      x-requirements: [FR-030, FR-032]
+      description: |
+        Equivalent to saving an empty week, and kept as its own operation because "I have no times
+        to offer" is a statement a person makes deliberately. `updated_at` is stamped, so the week
+        reads as cleared-on-a-date rather than never-stated.
+      responses:
+        '204': { description: The week is cleared. }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /me/players/{profile_id}/availability:
+    get:
+      tags: [availability]
+      summary: Read a player profile's stated week
+      operationId: getProfileAvailability
+      x-requirements: [FR-025, FR-032, FR-033, FR-035]
+      description: |
+        Nested under the family resource, so ownership is the check that resource already performs:
+        a parent reaches their own profile and each child's; a signed-in child reaches their own and
+        nothing else. An unreachable profile — another account's, or a sibling's when the caller is
+        a child — is a 404, not a 403, exactly as feature 001's family routes behave.
+      parameters:
+        - $ref: '#/components/parameters/PlayerProfileId'
+      responses:
+        '200':
+          description: That profile's stated week.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AvailabilityWeek' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+    put:
+      tags: [availability]
+      summary: Replace a player profile's stated week
+      operationId: replaceProfileAvailability
+      x-requirements: [FR-025, FR-026, FR-027, FR-028, FR-029, FR-032, FR-033]
+      description: |
+        Same whole-week semantics and same validation as `PUT /me/availability`. A parent may save
+        for their own profile and for any child's; a signed-in child may save only their own
+        (FR-033) — the parent retains authority to revise what a child stated.
+      parameters:
+        - $ref: '#/components/parameters/PlayerProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AvailabilityWeekUpdate' }
+      responses:
+        '200':
+          description: The stored week, as saved.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AvailabilityWeek' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+    delete:
+      tags: [availability]
+      summary: Clear a player profile's stated week
+      operationId: clearProfileAvailability
+      x-requirements: [FR-030, FR-032, FR-033]
+      parameters:
+        - $ref: '#/components/parameters/PlayerProfileId'
+      responses:
+        '204': { description: The week is cleared. }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /trainer/coaches/{coach_user_id}/availability:
+    get:
+      tags: [availability]
+      summary: Read a coach's stated week, as their trainer
+      operationId: getCoachAvailabilityAsTrainer
+      x-requirements: [FR-034, FR-036, FR-037]
+      description: |
+        Read-only and scoped to the caller's own roster: a coach on another trainer's roster is a
+        404 (FR-036). There is no matching write operation anywhere in the contract — stated times
+        are the person's own (FR-037).
+      parameters:
+        - $ref: '#/components/parameters/CoachUserId'
+      responses:
+        '200':
+          description: The coach's stated week, with the date it was last revised.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AvailabilityWeek' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /trainer/players/{profile_id}/availability:
+    get:
+      tags: [availability]
+      summary: Read a player profile's stated week, as their trainer
+      operationId: getPlayerAvailabilityAsTrainer
+      x-requirements: [FR-034, FR-036, FR-037, FR-039]
+      description: |
+        Read-only and scoped to an **Active** association between the caller and this profile, which
+        is what makes FR-039's "disclosure stops the moment an association ends" true with no
+        separate step: the same query that authorizes the read is the one that would stop matching.
+      parameters:
+        - $ref: '#/components/parameters/PlayerProfileId'
+      responses:
+        '200':
+          description: The profile's stated week, with the date it was last revised.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AvailabilityWeek' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ==========================================================================
+  # Impersonation (FR-040 – FR-056)
+  # ==========================================================================
+
+  /admin/impersonations:
+    post:
+      tags: [impersonation]
+      summary: Start impersonating a user
+      operationId: startImpersonation
+      x-requirements: [FR-040, FR-041, FR-042, FR-048, FR-049, FR-051, FR-052]
+      description: |
+        Super Admin only, enforced on the request. No new session is created: the caller's existing
+        session begins resolving to the target account, and the impersonated person's own sessions
+        are untouched (FR-049).
+
+        Refused with `422 impersonation_not_permitted` when the target is another Super Admin, the
+        caller themselves, or an account whose personal information has been erased (FR-042). An
+        Inactive target is permitted and is labelled in the response.
+
+        If the caller already holds an open impersonation it is closed as `superseded` in the same
+        transaction (FR-048).
+
+        Because the caller's own session now resolves to the target, this endpoint is unreachable
+        *while* impersonating — the effective user is not a Super Admin — which is how FR-047's
+        no-nested-impersonation rule is structural rather than hand-written (research.md R2-15).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImpersonationCreate' }
+      responses:
+        '201':
+          description: The impersonation is live; the caller's next request is the target's.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Impersonation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ActionNotPermitted' }
+
+    get:
+      tags: [impersonation]
+      summary: Read the impersonation history
+      operationId: listImpersonations
+      x-requirements: [FR-053, FR-054, FR-055, FR-056]
+      description: |
+        Super Admin only; nothing is returned to any other role (FR-056). Every impersonation the
+        platform has ever permitted, including any still in progress (`ended_at: null`), newest
+        first. `duration_seconds` is computed, not stored, and is `null` while in progress.
+
+        Entries survive the erasure of the impersonated account: once erasure has removed the
+        personal details, the row still names the account by identifier (FR-055).
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: admin_user_id
+          in: query
+          required: false
+          description: Only impersonations started by this Super Admin.
+          schema: { type: string, format: uuid }
+        - name: target_user_id
+          in: query
+          required: false
+          description: Only impersonations of this account.
+          schema: { type: string, format: uuid }
+        - name: started_from
+          in: query
+          required: false
+          description: Only impersonations that started at or after this instant (UTC).
+          schema: { type: string, format: date-time }
+        - name: started_to
+          in: query
+          required: false
+          description: Only impersonations that started at or before this instant (UTC).
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: One page of history entries.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImpersonationPage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /admin/impersonations/current:
+    delete:
+      tags: [impersonation]
+      summary: Leave the impersonation in progress
+      operationId: endImpersonation
+      x-requirements: [FR-045, FR-046, FR-051]
+      description: |
+        **The one operation in the contract that authorizes on the caller's real identity rather
+        than their effective one** (research.md R2-15). While impersonating a Trainer the effective
+        user is a Trainer, so a Super Admin role gate here would lock the admin inside the
+        impersonation until the one-hour ceiling. The gate is instead: an Active Super Admin session
+        holding an open impersonation.
+
+        Returns the admin to their own view with their own permissions and no re-authentication. The
+        impersonation is closed as `exited`.
+
+        `404` when the caller holds no open impersonation — including the case where it has just
+        ended on the deadline, which the caller learns from `GET /auth/session`.
+      responses:
+        '204': { description: The impersonation has ended; the caller is themselves again. }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ==========================================================================
+  # Extended existing operation (schema additions only)
+  # ==========================================================================
+
+  /auth/session:
+    get:
+      tags: [auth]
+      summary: Describe the signed-in caller — extended with the impersonation block
+      operationId: getSession
+      x-requirements: [FR-043, FR-044, FR-046]
+      description: |
+        Unchanged from 1.2.0 except for two new nullable fields on `CurrentUser`.
+
+        **While an impersonation is live**, this endpoint describes the **impersonated person** —
+        their id, role, status, name, contexts, and branding — because that is what FR-043 requires
+        of every view. The `impersonation` block is what tells the client it is not looking at its
+        own account: it names the impersonated person, the acting Super Admin, and the deadline, and
+        it is the sole source for the banner FR-044 requires.
+
+        `impersonation_ended` is populated for a short window after an impersonation ended for any
+        reason other than the admin choosing to leave, so a timed-out admin is told why they are back
+        in their own view (FR-046, research.md R2-20). It is derived from the closed row, not stored
+        as a delivered-notice flag, and the client shows it once per impersonation id.
+      responses:
+        '200':
+          description: The effective caller, plus the impersonation blocks when they apply.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CurrentUser' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: pp_session
+      description: |
+        Unchanged from feature 001. While an impersonation is live the same cookie resolves to the
+        impersonated account; no second credential is issued (research.md R2-14).
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+    CoachInvitationId:
+      name: invitation_id
+      in: path
+      required: true
+      description: An invitation issued by the calling trainer. Another trainer's is a 404.
+      schema: { type: string, format: uuid }
+    CoachInvitationToken:
+      name: token
+      in: path
+      required: true
+      description: |
+        The raw token from the emailed URL. Only its SHA-256 is stored (research.md R2-02), so this
+        value cannot be recovered from the database or read back by the trainer.
+      schema: { type: string, minLength: 32, maxLength: 64 }
+    CoachUserId:
+      name: coach_user_id
+      in: path
+      required: true
+      description: |
+        A coach on the calling trainer's own roster. A coach on another roster, or on none, is a 404
+        rather than a 403 — the caller is naming a resource they do not have.
+      schema: { type: string, format: uuid }
+    PlayerProfileId:
+      name: profile_id
+      in: path
+      required: true
+      description: |
+        A player profile. Under `/me/players` it must be on the caller's own account; under
+        `/trainer/players` it must hold an Active association with the caller. Unreachable profiles
+        are 404, as in feature 001.
+      schema: { type: string, format: uuid }
+
+  responses:
+    Unauthenticated:
+      description: No usable session cookie.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: The caller's role or ownership does not permit this action.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: No such resource is reachable by this caller.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: The request conflicts with existing state.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ActionNotPermitted:
+      description: Understood, well-formed, and refused by a domain rule.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InvitationLinkInvalid:
+      description: |
+        The invitation cannot be used. One body for every reason — unknown, spent, revoked,
+        superseded, expired, inviting trainer no longer Active.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: Too many invitation lookups from this origin.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ValidationError:
+      description: One or more fields are invalid; each offending field is identified.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ValidationErrorResponse' }
+
+  schemas:
+    # --- Envelopes (identical to feature 001; repeated so this file validates) ---
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: true
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+    ValidationErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [message, fields]
+          properties:
+            message: { type: string }
+            fields:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [field, message]
+                properties:
+                  field: { type: string }
+                  message: { type: string }
+
+    # --- Coach invitations ---
+    CoachInvitationCreate:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          description: The invited address. Lower-cased on receipt.
+        invitee_name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 200
+          description: |
+            Optional. `null` when not given — never `""`, which is a 422 (Principle VI).
+        message:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 2000
+          description: Optional personal message, carried into the invitation email.
+
+    CoachInvitationState:
+      type: string
+      enum: [awaiting, accepted, expired, revoked, blocked]
+      description: |
+        The **presented** state (data-model.md §101.1). `superseded` is not in this enum because a
+        superseded invitation is never returned. `expired` and `blocked` are derived, not stored.
+
+    CoachInvitation:
+      type: object
+      additionalProperties: false
+      required:
+        [id, invited_email, invitee_name, message, state, issued_at, expires_at, accepted_at,
+         revoked_at, blocked_reason, coach]
+      properties:
+        id: { type: string, format: uuid }
+        invited_email: { type: string, format: email }
+        invitee_name: { type: [string, 'null'] }
+        message: { type: [string, 'null'] }
+        state: { $ref: '#/components/schemas/CoachInvitationState' }
+        issued_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        accepted_at: { type: [string, 'null'], format: date-time }
+        revoked_at: { type: [string, 'null'], format: date-time }
+        blocked_reason:
+          type: [string, 'null']
+          enum: [role_not_coach, already_assigned, null]
+          description: |
+            Why an acceptance was refused (FR-019). `already_assigned` never carries or implies the
+            identity of the trainer the coach already works with (FR-015).
+        coach:
+          oneOf:
+            - $ref: '#/components/schemas/CoachSummary'
+            - type: 'null'
+          description: The coach who accepted, once one has. `null` in every other state.
+
+    CoachInvitationPage:
+      type: object
+      additionalProperties: false
+      required: [items, total, page, page_size]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/CoachInvitation' }
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
+
+    CoachInvitationConflict:
+      type: object
+      additionalProperties: false
+      required: [error]
+      description: FR-007's 409 — the existing invitation is named so the client can act on it.
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, invitation]
+          properties:
+            code: { type: string, enum: [coach_invitation_pending] }
+            message: { type: string }
+            invitation: { $ref: '#/components/schemas/CoachInvitation' }
+
+    CoachInvitationPreview:
+      type: object
+      additionalProperties: false
+      required: [invited_email, invitee_name, message, expires_at, account_exists, trainer]
+      properties:
+        invited_email:
+          type: string
+          format: email
+          description: |
+            Returned in full, not masked: the reader received the mail at this address, and FR-013
+            requires them to be told which address the invitation binds to.
+        invitee_name: { type: [string, 'null'] }
+        message: { type: [string, 'null'] }
+        expires_at: { type: string, format: date-time }
+        account_exists:
+          type: boolean
+          description: Whether an account already exists at the invited address (register vs sign in).
+        trainer:
+          type: object
+          additionalProperties: false
+          required: [business_name, portal_branding]
+          description: |
+            Enough to show whose organization this is, and to brand the page before sign-in — the
+            same public branding the player join page already renders. The trainer's public
+            identity only: no address, no contact detail, no counts.
+          properties:
+            business_name: { type: string }
+            portal_branding:
+              type: object
+              additionalProperties: true
+              description: As defined by feature 001's `PortalBranding`.
+
+    CoachRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required: [first_name, last_name, password]
+      description: |
+        No `email` and no `role`: both come from the invitation (FR-011, FR-013). No `trainer_id`
+        either — the invitation names the trainer.
+      properties:
+        first_name: { type: string, minLength: 1, maxLength: 100 }
+        last_name: { type: string, minLength: 1, maxLength: 100 }
+        password:
+          type: string
+          minLength: 12
+          description: Subject to the same password policy every other account is.
+        phone:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 32
+        bio:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 2000
+        credentials:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 1000
+        certifications:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 1000
+
+    CoachJoinResult:
+      type: object
+      additionalProperties: false
+      required: [outcome, trainer_business_name, joined_at]
+      properties:
+        outcome:
+          type: string
+          enum: [joined, already_on_this_roster]
+          description: FR-016's no-op is reported as an outcome, not as an error.
+        trainer_business_name: { type: string }
+        joined_at: { type: string, format: date-time }
+
+    CoachSummary:
+      type: object
+      additionalProperties: false
+      required: [user_id, first_name, last_name, email, status, photo_url]
+      properties:
+        user_id: { type: string, format: uuid }
+        first_name: { type: string }
+        last_name: { type: string }
+        email: { type: string, format: email }
+        status: { type: string, enum: [active, inactive, deleted] }
+        photo_url: { type: [string, 'null'] }
+
+    TrainerCoachSummary:
+      allOf:
+        - $ref: '#/components/schemas/CoachSummary'
+        - type: object
+          additionalProperties: false
+          required: [joined_at, availability, availability_updated_at]
+          properties:
+            joined_at: { type: string, format: date-time }
+            availability:
+              type: array
+              description: |
+                The coach's stated slots, so the list renders a summary without one request per row
+                (research.md R2-12). Empty for "no times set".
+              items: { $ref: '#/components/schemas/AvailabilitySlot' }
+            availability_updated_at: { type: [string, 'null'], format: date-time }
+
+    TrainerCoachPage:
+      type: object
+      additionalProperties: false
+      required: [items, total, page, page_size]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TrainerCoachSummary' }
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
+
+    # --- Availability ---
+    AvailabilitySlot:
+      type: object
+      additionalProperties: false
+      required: [day_of_week, start_minute, end_minute]
+      description: |
+        One range on one day. Minutes from midnight on a 15-minute grid (research.md R2-08):
+        `17:00–20:00` is `{day_of_week: 0, start_minute: 1020, end_minute: 1200}`.
+      properties:
+        day_of_week:
+          type: integer
+          minimum: 0
+          maximum: 6
+          description: 0 = Monday … 6 = Sunday.
+        start_minute:
+          type: integer
+          minimum: 0
+          maximum: 1425
+          multipleOf: 15
+        end_minute:
+          type: integer
+          minimum: 15
+          maximum: 1440
+          multipleOf: 15
+          description: May be 1440 (midnight). Must be greater than `start_minute`.
+
+    AvailabilityWeek:
+      type: object
+      additionalProperties: false
+      required: [slots, updated_at]
+      properties:
+        slots:
+          type: array
+          maxItems: 42
+          description: |
+            Ordered by `(day_of_week, start_minute)`. At most six per day (FR-028), so at most 42.
+          items: { $ref: '#/components/schemas/AvailabilitySlot' }
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            `null` means never stated. A non-null value with an empty `slots` means deliberately
+            cleared. Neither means "unavailable" (FR-035).
+
+    AvailabilityWeekUpdate:
+      type: object
+      additionalProperties: false
+      required: [slots]
+      description: |
+        The complete week. This is a replacement, not a patch: whatever is absent is removed
+        (FR-029). An empty array is equivalent to `DELETE`.
+      properties:
+        slots:
+          type: array
+          maxItems: 42
+          items: { $ref: '#/components/schemas/AvailabilitySlot' }
+
+    # --- Impersonation ---
+    ImpersonationCreate:
+      type: object
+      additionalProperties: false
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: The account to impersonate. Not a Super Admin, not the caller, not erased.
+
+    ImpersonationEndReason:
+      type: string
+      enum:
+        [exited, timed_out, signed_out, superseded, target_deactivated, target_erased,
+         admin_deactivated]
+
+    Impersonation:
+      type: object
+      additionalProperties: false
+      required:
+        [id, admin, target, target_status_at_start, started_at, expires_at, ended_at, end_reason,
+         duration_seconds]
+      properties:
+        id: { type: string, format: uuid }
+        admin: { $ref: '#/components/schemas/ImpersonationParticipant' }
+        target: { $ref: '#/components/schemas/ImpersonationParticipant' }
+        target_status_at_start:
+          type: string
+          enum: [active, inactive]
+          description: |
+            What makes FR-050's "leaves Active status" computable, and what the client labels an
+            Inactive impersonation with (FR-042, research.md R2-19).
+        started_at: { type: string, format: date-time }
+        expires_at:
+          type: string
+          format: date-time
+          description: The one-hour ceiling. Not extended by activity (FR-046).
+        ended_at: { type: [string, 'null'], format: date-time }
+        end_reason:
+          oneOf:
+            - $ref: '#/components/schemas/ImpersonationEndReason'
+            - type: 'null'
+        duration_seconds:
+          type: [integer, 'null']
+          description: Computed from the two timestamps, never stored. `null` while in progress.
+
+    ImpersonationParticipant:
+      type: object
+      additionalProperties: false
+      required: [user_id, display_name, role]
+      description: |
+        Named by identifier first: after the impersonated account is erased, `display_name` is the
+        anonymized name feature 001's erasure leaves behind, and the entry still stands (FR-055).
+      properties:
+        user_id: { type: string, format: uuid }
+        display_name: { type: string }
+        role: { type: string, enum: [super_admin, trainer, coach, player_parent] }
+
+    ImpersonationPage:
+      type: object
+      additionalProperties: false
+      required: [items, total, page, page_size]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Impersonation' }
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
+
+    # --- Extended: CurrentUser (1.2.0 fields elided; the two additions are normative here) ---
+    CurrentUser:
+      type: object
+      additionalProperties: true
+      required: [id, email, role, status, first_name, last_name, impersonation, impersonation_ended]
+      description: |
+        As defined at 1.2.0, plus the two fields below. While an impersonation is live, every
+        1.2.0 field describes the **impersonated person** (FR-043); the two new fields are the only
+        way a client learns otherwise.
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role: { type: string, enum: [super_admin, trainer, coach, player_parent] }
+        status: { type: string, enum: [active, inactive, deleted] }
+        first_name: { type: string }
+        last_name: { type: string }
+        impersonation:
+          oneOf:
+            - $ref: '#/components/schemas/Impersonation'
+            - type: 'null'
+          description: |
+            The live impersonation, or `null`. The sole source for the banner FR-044 requires: its
+            presence is what tells the client the described account is not the caller's own.
+        impersonation_ended:
+          oneOf:
+            - $ref: '#/components/schemas/Impersonation'
+            - type: 'null'
+          description: |
+            The caller's most recently ended impersonation, when it ended within the last 120
+            seconds for a reason other than `exited` (FR-046, research.md R2-20). Derived from the
+            closed row; the client shows it once per `id` and it disappears on its own.

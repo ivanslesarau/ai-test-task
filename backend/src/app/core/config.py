@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     bootstrap_admin_email: str
     bootstrap_admin_password: str
 
+    # Feature 002: coach invitations, availability, impersonation.
+    coach_invitation_ttl_days: int
+    impersonation_max_minutes: int
+
     @property
     def cookie_secure(self) -> bool:
         return self.app_env == "production"

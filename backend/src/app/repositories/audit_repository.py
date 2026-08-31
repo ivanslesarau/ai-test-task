@@ -25,6 +25,13 @@ class AuditRepository:
         reason: str | None = None,
         detail: str | None = None,
     ) -> AuditEntry:
+        # research.md R2-16: the single choke point for dual attribution.
+        # `get_principal` stamps `AsyncSession.info["impersonator_user_id"]`
+        # when the request is riding a live impersonation; every other
+        # audit-writing call site is unchanged and need not know this
+        # column exists. Defaults to `None` — an ordinary action leaves the
+        # column NULL, exactly as before this feature.
+        impersonator_user_id = self._session.info.get("impersonator_user_id")
         entry = AuditEntry(
             action=action,
             actor_user_id=actor_user_id,
@@ -32,6 +39,7 @@ class AuditRepository:
             reason=reason,
             detail=detail,
             occurred_at=utcnow(),
+            impersonator_user_id=impersonator_user_id,
         )
         self._session.add(entry)
         await self._session.flush()

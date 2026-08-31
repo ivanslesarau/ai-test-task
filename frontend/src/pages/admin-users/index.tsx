@@ -6,6 +6,7 @@ import { useErasureRecord, useUserDetail } from "@/entities/user/api/use-users";
 import { CreateUserForm } from "@/features/admin/create-user/ui/create-user-form";
 import { DeactivateDialog } from "@/features/admin/deactivate-user/ui/deactivate-dialog";
 import { EraseDialog } from "@/features/admin/erase-user/ui/erase-dialog";
+import { ImpersonationConfirmDialog } from "@/features/admin/impersonation/ui/impersonation-confirm-dialog";
 import { ReactivateDialog } from "@/features/admin/reactivate-user/ui/reactivate-dialog";
 import { ReinviteButton } from "@/features/admin/reinvite-user/ui/reinvite-button";
 import { Route as UsersIndexRoute } from "@/routes/_authed/admin/users.index";
@@ -63,6 +64,7 @@ export function UsersIndexPage() {
       <DeactivateDialog />
       <ReactivateDialog />
       <EraseDialog />
+      <ImpersonationConfirmDialog />
     </div>
   );
 }
@@ -169,6 +171,7 @@ export function UserDetailPage() {
       <DeactivateDialog />
       <ReactivateDialog />
       <EraseDialog />
+      <ImpersonationConfirmDialog />
     </div>
   );
 }

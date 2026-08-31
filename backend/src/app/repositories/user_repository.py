@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -319,3 +319,61 @@ class UserRepository:
         user.status = target_status.value
         user.version += 1
         user.updated_at = utcnow()
+
+    # --- Extension (2026-08-28): coach roster and assignment (US2,
+    # data-model.md §102, §113) -------------------------------------------
+
+    async def get_coach_detail(self, user_id: str) -> CoachDetail | None:
+        return await self._session.get(CoachDetail, user_id)
+
+    async def assign_coach_to_trainer(
+        self, detail: CoachDetail, *, trainer_user_id: str, joined_at: datetime
+    ) -> None:
+        """The write that makes "a coach works for at most one trainer"
+        true by construction (research.md R2-04) — a nullable pair of
+        columns on the one row a coach already has, not a second table."""
+        detail.trainer_user_id = trainer_user_id
+        detail.joined_at = joined_at
+        await self._session.flush()
+
+    async def end_coach_assignment(self, detail: CoachDetail) -> None:
+        """FR-021, FR-022: the coach is on no roster afterwards. Slots and
+        the account itself are untouched — only the assignment pair
+        clears (data-model.md §114)."""
+        detail.trainer_user_id = None
+        detail.joined_at = None
+        await self._session.flush()
+
+    async def list_coaches_for_trainer(
+        self, trainer_user_id: str, *, page: int, page_size: int, query: str | None
+    ) -> tuple[list[tuple[User, UserProfile, CoachDetail]], int]:
+        """FR-020, data-model.md §113: the trainer's own roster, scoped by
+        `coach_details.trainer_user_id` — there is no parameter that could
+        widen it. `ix_coach_details_trainer` backs the `WHERE`."""
+        base = (
+            select(User, UserProfile, CoachDetail)
+            .join(UserProfile, UserProfile.user_id == User.id)
+            .join(CoachDetail, CoachDetail.user_id == User.id)
+            .where(CoachDetail.trainer_user_id == trainer_user_id)
+        )
+
+        if query:
+            pattern = f"%{query.lower()}%"
+            base = base.where(
+                or_(
+                    func.lower(UserProfile.first_name).like(pattern),
+                    func.lower(UserProfile.last_name).like(pattern),
+                    func.lower(User.email).like(pattern),
+                )
+            )
+
+        total = (
+            await self._session.execute(select(func.count()).select_from(base.subquery()))
+        ).scalar_one()
+
+        rows = await self._session.execute(
+            base.order_by(CoachDetail.joined_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        return [(u, p, cd) for u, p, cd in rows.all()], total

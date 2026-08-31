@@ -26,6 +26,8 @@ _TEST_ENV = {
     "FRONTEND_BASE_URL": "http://localhost:5173",
     "BOOTSTRAP_ADMIN_EMAIL": "bootstrap-admin@example.org",
     "BOOTSTRAP_ADMIN_PASSWORD": "bootstrap-password-123456",
+    "COACH_INVITATION_TTL_DAYS": "7",
+    "IMPERSONATION_MAX_MINUTES": "60",
 }
 for key, value in _TEST_ENV.items():
     os.environ.setdefault(key, value)

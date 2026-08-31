@@ -2,9 +2,16 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, UploadFile
 
-from app.core.deps import ChildSigninServiceDep, FamilyServiceDep, RequireParentDep, require_roles
+from app.core.deps import (
+    AvailabilityServiceDep,
+    ChildSigninServiceDep,
+    FamilyServiceDep,
+    RequireParentDep,
+    require_roles,
+)
 from app.models.enums import UserRole
 from app.models.user import User
+from app.schemas.availability import AvailabilityWeekOut, AvailabilityWeekUpdate
 from app.schemas.child_signin import ChildSignIn, GrantChildSignInRequest
 from app.schemas.player_profile import (
     AddPlayerTrainerRequest,
@@ -153,3 +160,50 @@ async def revoke_own_child_signin(
     (FR-134); the profile, its associations, and its history are
     untouched."""
     await child_signin_service.revoke(user, profile_id)
+
+
+# --- Extension (2026-08-28): a player profile's weekly availability (US4) --
+
+
+@router.get("/{profile_id}/availability", response_model=AvailabilityWeekOut)
+async def get_player_availability(
+    profile_id: str,
+    user: PlayerParentOnlyDep,
+    family_service: FamilyServiceDep,
+    availability_service: AvailabilityServiceDep,
+) -> AvailabilityWeekOut:
+    """Nested under the family resource so ownership is the check that
+    resource already performs (research.md R2-11): a parent reaches their
+    own profile and each child's; a signed-in child reaches only their
+    own. An unreachable profile — another account's, or a sibling's when
+    the caller is a child — is a 404, not a 403, exactly as every other
+    `/me/players/{profile_id}` route behaves."""
+    resolved_id = await family_service.resolve_reachable_profile_id(user, profile_id)
+    return await availability_service.get_week(profile_id=resolved_id)
+
+
+@router.put("/{profile_id}/availability", response_model=AvailabilityWeekOut)
+async def replace_player_availability(
+    profile_id: str,
+    body: AvailabilityWeekUpdate,
+    user: PlayerParentOnlyDep,
+    family_service: FamilyServiceDep,
+    availability_service: AvailabilityServiceDep,
+) -> AvailabilityWeekOut:
+    """Same whole-week semantics as `PUT /me/availability`. A parent may
+    save for their own profile and for any child's; a signed-in child may
+    save only their own (FR-033) — the parent retains authority to revise
+    what a child stated."""
+    resolved_id = await family_service.resolve_reachable_profile_id(user, profile_id)
+    return await availability_service.replace_week(body, profile_id=resolved_id)
+
+
+@router.delete("/{profile_id}/availability", status_code=204)
+async def clear_player_availability(
+    profile_id: str,
+    user: PlayerParentOnlyDep,
+    family_service: FamilyServiceDep,
+    availability_service: AvailabilityServiceDep,
+) -> None:
+    resolved_id = await family_service.resolve_reachable_profile_id(user, profile_id)
+    await availability_service.clear_week(profile_id=resolved_id)

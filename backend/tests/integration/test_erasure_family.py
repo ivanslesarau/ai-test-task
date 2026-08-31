@@ -88,9 +88,7 @@ async def test_erasing_a_parent_cascades_through_the_whole_family(
 
     # The association the child holds with their trainer is untouched —
     # neither removed nor its status changed.
-    refreshed_association = await db_session.get(
-        TrainerPlayerAssociation, association.id
-    )
+    refreshed_association = await db_session.get(TrainerPlayerAssociation, association.id)
     assert refreshed_association is not None
     assert refreshed_association.status == "active"
     assert refreshed_association.trainer_user_id == trainer.id

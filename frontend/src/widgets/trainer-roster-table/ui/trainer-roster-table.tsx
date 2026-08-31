@@ -4,6 +4,7 @@ import { useNavigate } from '@tanstack/react-router'
 
 import { useTrainerRoster } from '@/entities/trainer-context/api/use-roster'
 import type { RosterSearch } from '@/entities/trainer-context/model/roster-search'
+import { AvailabilitySummary } from '@/features/availability/ui/availability-summary'
 import { useDebouncedCallback } from '@/shared/lib/use-debounced-callback'
 import { Button } from '@/shared/ui/button'
 import { Input } from '@/shared/ui/input'
@@ -63,6 +64,7 @@ export function TrainerRosterTable({ search }: TrainerRosterTableProps) {
                 <TableHead>Name</TableHead>
                 <TableHead>Age</TableHead>
                 <TableHead>Joined</TableHead>
+                <TableHead>Best times</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -71,6 +73,12 @@ export function TrainerRosterTable({ search }: TrainerRosterTableProps) {
                   <TableCell>{player.display_name}</TableCell>
                   <TableCell>{player.age ?? '—'}</TableCell>
                   <TableCell>{new Date(player.joined_at).toLocaleDateString()}</TableCell>
+                  <TableCell>
+                    <AvailabilitySummary
+                      slots={player.availability}
+                      updatedAt={player.availability_updated_at}
+                    />
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>

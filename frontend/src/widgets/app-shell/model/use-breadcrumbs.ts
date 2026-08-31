@@ -1,5 +1,6 @@
 import { useMatches } from '@tanstack/react-router'
 
+import type { ImpersonationHistorySearch } from '@/entities/impersonation/model/history-search'
 import type { DirectorySearch } from '@/entities/user/model/directory-search'
 
 interface BaseCrumb {
@@ -27,6 +28,11 @@ export type BreadcrumbCrumb =
   | (BaseCrumb & { to: '/family/$profileId'; params: { profileId: string } })
   | (BaseCrumb & { to: '/approvals' })
   | (BaseCrumb & { to: '/requests' })
+  | (BaseCrumb & { to: '/my-times' })
+  | (BaseCrumb & { to: '/availability' })
+  | (BaseCrumb & { to: '/trainer/coaches' })
+  | (BaseCrumb & { to: '/trainer/coaches/$coachUserId'; params: { coachUserId: string } })
+  | (BaseCrumb & { to: '/admin/impersonations'; search: ImpersonationHistorySearch })
 
 /**
  * One label per route that has a page worth naming in the trail. The
@@ -46,6 +52,11 @@ const ROUTE_LABELS: Partial<Record<string, string>> = {
   '/_authed/family/$profileId': 'Player',
   '/_authed/approvals': 'Approvals',
   '/_authed/requests': 'Requests',
+  '/_authed/my-times': 'My Times',
+  '/_authed/availability': 'Availability',
+  '/_authed/trainer/coaches/': 'Coaches',
+  '/_authed/trainer/coaches/$coachUserId': 'Coach',
+  '/_authed/admin/impersonations': 'Impersonation history',
 }
 
 const HOME_CRUMB = { key: '/_authed/', label: 'Home', to: '/' } as const
@@ -121,6 +132,33 @@ export function useBreadcrumbs(): BreadcrumbCrumb[] {
         break
       case '/_authed/requests':
         pageCrumbs.push({ key: match.routeId, label, to: '/requests', isCurrent })
+        break
+      case '/_authed/my-times':
+        pageCrumbs.push({ key: match.routeId, label, to: '/my-times', isCurrent })
+        break
+      case '/_authed/availability':
+        pageCrumbs.push({ key: match.routeId, label, to: '/availability', isCurrent })
+        break
+      case '/_authed/trainer/coaches/':
+        pageCrumbs.push({ key: match.routeId, label, to: '/trainer/coaches', isCurrent })
+        break
+      case '/_authed/trainer/coaches/$coachUserId':
+        pageCrumbs.push({
+          key: match.routeId,
+          label,
+          to: '/trainer/coaches/$coachUserId',
+          params: match.params as { coachUserId: string },
+          isCurrent,
+        })
+        break
+      case '/_authed/admin/impersonations':
+        pageCrumbs.push({
+          key: match.routeId,
+          label,
+          to: '/admin/impersonations',
+          search: match.search as ImpersonationHistorySearch,
+          isCurrent,
+        })
         break
       default:
         break

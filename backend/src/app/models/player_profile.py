@@ -110,6 +110,13 @@ class PlayerProfile(Base):
     created_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow, onupdate=utcnow)
 
+    # This profile's "last revised" stamp for its weekly availability
+    # (data-model.md §104, research.md R2-09). `NULL` = never stated;
+    # written on every accepted save and on a clear, which is why it
+    # cannot be derived from `availability_slots` — a cleared week has no
+    # rows there.
+    availability_updated_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
 
 class ActiveTrainingContext(Base):
     """Which player profile and trainer a signed-in account is looking at

@@ -32,9 +32,20 @@ export interface CurrentUser {
    * to withhold the controls FR-132 forbids. */
   is_child_account: boolean
   /** Resolved server-side per FR-101 — a trainer's own, a player's
-   * active context's, or the platform default. Coaches receive the
-   * default until US-01.08 (research.md R-33). */
+   * active context's, a coach's assigned trainer's, or the platform
+   * default (research.md R2-06). A coach on no roster receives the
+   * platform default. */
   portal_branding: PortalBranding
+  /** While an impersonation is live, every field above describes the
+   * *impersonated* person (FR-043) — this is the sole source for the
+   * banner (FR-044): its presence is what tells the client the described
+   * account is not the caller's own (research.md R2-14). `null`
+   * otherwise. Extension (2026-08-28, US6, contract v1.3.0). */
+  impersonation: Impersonation | null
+  /** The caller's most recently ended impersonation, populated only for a
+   * short window after it ended for a reason other than `exited`
+   * (research.md R2-20). Shown once per `id`, then ignored. */
+  impersonation_ended: Impersonation | null
 }
 
 export interface TrainerDetail {
@@ -216,7 +227,11 @@ export interface LoginRequest {
 // -----------------------------------------------------------------------
 
 export type Gender = 'male' | 'female' | 'other' | 'prefer_not_to_say'
-export type ShareLinkKind = 'player_standing' | 'coach_single_use'
+/** `'coach_single_use'` was a forward declaration only — no row of that
+ * kind was ever written, and the backend enum dropped it entirely (spec
+ * 002, data-model.md §109.4, research.md R2-01): coach invitations live
+ * in their own `coach_invitations` table instead. */
+export type ShareLinkKind = 'player_standing'
 
 export interface PortalBranding {
   logo_url: string | null
@@ -299,6 +314,10 @@ export interface TrainerPlayerSummary {
   /** The account responsible for this player — the player themselves for
    * a `self` profile, the parent for a `child` (FR-113, FR-116). */
   responsible_contact: ResponsibleContact
+  /** The profile's stated slots, embedded so the roster renders its
+   * summary without one request per row (US5, research.md R2-12). */
+  availability: AvailabilitySlot[]
+  availability_updated_at: string | null
 }
 
 export interface TrainerPlayerPage {
@@ -474,4 +493,205 @@ export interface ApprovalDecisionRequest {
 
 export interface ApprovalInfoRequest {
   note: string
+}
+
+// -----------------------------------------------------------------------
+// Extension (2026-08-28): availability ("My Times")
+// Mirrors contracts/openapi.yaml v1.3.0 (specs/002-coach-availability-impersonation).
+// -----------------------------------------------------------------------
+
+export interface AvailabilitySlot {
+  /** 0 = Monday … 6 = Sunday. */
+  day_of_week: number
+  /** Minutes from midnight, multiple of 15, 0-1425. */
+  start_minute: number
+  /** Minutes from midnight, multiple of 15, 15-1440. May be 1440
+   * (midnight); always greater than `start_minute`. */
+  end_minute: number
+}
+
+export interface AvailabilityWeek {
+  /** Ordered by `(day_of_week, start_minute)`. At most six per day
+   * (FR-028), so at most 42. */
+  slots: AvailabilitySlot[]
+  /** `null` means never stated. A non-null value with an empty `slots`
+   * means deliberately cleared. Neither means "unavailable" (FR-035) —
+   * the frontend renders both as "No times set", never "Unavailable". */
+  updated_at: string | null
+}
+
+export interface AvailabilityWeekUpdate {
+  /** The complete week — a replacement, not a patch. An empty array is
+   * equivalent to `DELETE` (FR-029). */
+  slots: AvailabilitySlot[]
+}
+
+// -----------------------------------------------------------------------
+// Extension (2026-08-28): coach invitations (US1)
+// Mirrors contracts/openapi.yaml v1.3.0 (specs/002-coach-availability-impersonation).
+// -----------------------------------------------------------------------
+
+/** The **presented** state (data-model.md §101.1). `superseded` never
+ * appears — a superseded row is never returned to the client (FR-005). */
+export type CoachInvitationPresentedState = 'awaiting' | 'accepted' | 'expired' | 'revoked' | 'blocked'
+
+export type CoachInvitationBlockReason = 'role_not_coach' | 'already_assigned'
+
+export interface CoachSummary {
+  user_id: string
+  first_name: string
+  last_name: string
+  email: string
+  status: AccountStatus
+  photo_url: string | null
+}
+
+export interface CoachInvitation {
+  id: string
+  invited_email: string
+  invitee_name: string | null
+  message: string | null
+  state: CoachInvitationPresentedState
+  issued_at: string
+  expires_at: string
+  accepted_at: string | null
+  revoked_at: string | null
+  /** Why an acceptance was refused (FR-019). `already_assigned` never
+   * carries or implies the identity of the other trainer (FR-015). */
+  blocked_reason: CoachInvitationBlockReason | null
+  /** The coach who accepted, once one has. `null` in every other state —
+   * always `null` for anything User Story 1 itself produces, since no
+   * coach has accepted anything yet. */
+  coach: CoachSummary | null
+}
+
+export interface CoachInvitationPage {
+  items: CoachInvitation[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface CoachInvitationCreate {
+  email: string
+  /** `''` never crosses the network boundary (Principle VI) — the shared
+   * normalizer turns an empty controlled-input value into `null` before
+   * a submit handler builds this request body. */
+  invitee_name: string | null
+  message: string | null
+}
+
+export interface CoachInvitationConflict {
+  error: {
+    code: 'coach_invitation_pending'
+    message: string
+    invitation: CoachInvitation
+  }
+}
+
+// -----------------------------------------------------------------------
+// Extension (2026-08-28): coach invitation acceptance and the coach
+// roster (US2). Mirrors contracts/openapi.yaml v1.3.0.
+// -----------------------------------------------------------------------
+
+export interface CoachInvitationPreviewTrainer {
+  business_name: string
+  portal_branding: PortalBranding
+}
+
+export interface CoachInvitationPreview {
+  invited_email: string
+  invitee_name: string | null
+  message: string | null
+  expires_at: string
+  /** Whether an account already exists at the invited address — decides
+   * whether the page offers registration or sign-in (not the FR-008
+   * enumeration leak: this response is gated on a 256-bit token mailed
+   * to that address, research.md R2-05). */
+  account_exists: boolean
+  trainer: CoachInvitationPreviewTrainer
+}
+
+export interface CoachRegistrationRequest {
+  first_name: string
+  last_name: string
+  password: string
+  /** No `email`, `role`, or `trainer_id` field exists on this type at
+   * all — all three come from the invitation (FR-011, FR-013). */
+  phone: string | null
+  bio: string | null
+  credentials: string | null
+  certifications: string | null
+}
+
+export interface CoachJoinResult {
+  /** FR-016's re-acceptance is reported as an outcome, not an error. */
+  outcome: 'joined' | 'already_on_this_roster'
+  trainer_business_name: string
+  joined_at: string
+}
+
+export interface TrainerCoachSummary extends CoachSummary {
+  joined_at: string
+  /** The coach's stated slots, embedded so the roster renders its
+   * summary without one request per row (research.md R2-12). */
+  availability: AvailabilitySlot[]
+  availability_updated_at: string | null
+}
+
+export interface TrainerCoachPage {
+  items: TrainerCoachSummary[]
+  total: number
+  page: number
+  page_size: number
+}
+
+// -----------------------------------------------------------------------
+// Extension (2026-08-28): Super Admin impersonation (US6)
+// Mirrors contracts/openapi.yaml v1.3.0 (specs/002-coach-availability-impersonation).
+// -----------------------------------------------------------------------
+
+export type ImpersonationEndReason =
+  | 'exited'
+  | 'timed_out'
+  | 'signed_out'
+  | 'superseded'
+  | 'target_deactivated'
+  | 'target_erased'
+  | 'admin_deactivated'
+
+export interface ImpersonationParticipant {
+  user_id: string
+  /** After the impersonated account is erased, this is the anonymized
+   * name feature 001's erasure leaves behind — the entry still stands
+   * (FR-055). */
+  display_name: string
+  role: UserRole
+}
+
+export interface Impersonation {
+  id: string
+  admin: ImpersonationParticipant
+  target: ImpersonationParticipant
+  /** What the client labels an Inactive impersonation with (FR-042,
+   * research.md R2-19). */
+  target_status_at_start: 'active' | 'inactive'
+  started_at: string
+  /** The one-hour ceiling. Not extended by activity (FR-046). */
+  expires_at: string
+  ended_at: string | null
+  end_reason: ImpersonationEndReason | null
+  /** Computed server-side, never stored. `null` while in progress. */
+  duration_seconds: number | null
+}
+
+export interface ImpersonationPage {
+  items: Impersonation[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface ImpersonationCreate {
+  user_id: string
 }

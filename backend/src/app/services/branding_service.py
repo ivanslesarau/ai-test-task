@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import PayloadTooLarge, ValidationFailure
 from app.db.base import new_uuid, utcnow
 from app.models.enums import UserRole
-from app.models.role_details import TrainerOrganization
+from app.models.role_details import CoachDetail, TrainerOrganization
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.schemas.branding import (
@@ -36,12 +36,9 @@ class BrandingService:
 
     async def resolve_for_viewer(self, user: User) -> PortalBranding:
         """FR-101's rule, one function: a trainer's own branding, a
-        player's active context's, the platform default otherwise.
-
-        Coach is not yet resolvable to an employer trainer — which
-        trainer a coach works for is US-01.08, out of scope here — so a
-        Coach receives the platform default. See research.md R-33; this
-        is a known, documented gap, not an oversight."""
+        player's active context's, a coach's assigned trainer's, and the
+        platform default for everyone else (research.md R2-06, closing
+        the R-33 gap feature 001 left)."""
         if user.role_enum is UserRole.TRAINER:
             trainer_org = await self._users.get_role_detail(user)
             return build_portal_branding_out(trainer_org)
@@ -59,9 +56,22 @@ class BrandingService:
             trainer_org = await self._users.get_role_detail(trainer)
             return build_portal_branding_out(trainer_org)
 
-        # TODO(US-01.08): once a coach's employer trainer is known, this
-        # branch resolves that trainer's branding exactly as the Trainer
-        # branch above does.
+        if user.role_enum is UserRole.COACH:
+            # research.md R2-06: a coach on a roster receives that
+            # trainer's branding, exactly as the Trainer branch above —
+            # `coach_details.trainer_user_id` is what US-01.08 supplied
+            # (data-model.md §102, R2-04). A coach on no roster, or whose
+            # assigned trainer no longer resolves, falls back to the
+            # platform default.
+            coach_detail = await self._users.get_role_detail(user)
+            if not isinstance(coach_detail, CoachDetail) or coach_detail.trainer_user_id is None:
+                return DEFAULT_PORTAL_BRANDING
+            trainer = await self._users.get_by_id(coach_detail.trainer_user_id)
+            if trainer is None:
+                return DEFAULT_PORTAL_BRANDING
+            trainer_org = await self._users.get_role_detail(trainer)
+            return build_portal_branding_out(trainer_org)
+
         return DEFAULT_PORTAL_BRANDING
 
     async def get_own(self, trainer: User) -> PortalBranding:

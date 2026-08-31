@@ -32,17 +32,13 @@ def test_usd_payment_always_requires_approval(tokens_without_approval: bool) -> 
 def test_token_spend_requires_approval_when_setting_is_off() -> None:
     from app.models.enums import ApprovalRequestKind
 
-    assert (
-        approval_required(ApprovalRequestKind.TOKEN_SPEND, tokens_without_approval=False) is True
-    )
+    assert approval_required(ApprovalRequestKind.TOKEN_SPEND, tokens_without_approval=False) is True
 
 
 def test_token_spend_does_not_require_approval_when_setting_is_on() -> None:
     from app.models.enums import ApprovalRequestKind
 
-    assert (
-        approval_required(ApprovalRequestKind.TOKEN_SPEND, tokens_without_approval=True) is False
-    )
+    assert approval_required(ApprovalRequestKind.TOKEN_SPEND, tokens_without_approval=True) is False
 
 
 # FR-137/FR-138: join_trainer always requires approval — it is the only

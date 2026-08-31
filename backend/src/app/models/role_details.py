@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, String
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -32,13 +32,34 @@ class TrainerOrganization(Base):
 
 
 class CoachDetail(Base):
-    """A coach's professional presentation (data-model.md §4.2).
+    """A coach's professional presentation (data-model.md §4.2, §102,
+    §104).
 
-    The single-trainer assignment Epic-01 describes is out of scope; no
-    column for it exists here.
+    `trainer_user_id`/`joined_at` are what make "a coach works for at
+    most one trainer" true by construction rather than by a checked rule
+    (research.md R2-04): a nullable column on a table that already holds
+    exactly one row per coach admits no shape in which two assignments
+    exist. `NULL` means the coach is on no roster (FR-021, FR-022).
+    Deliberately no `ON DELETE CASCADE` on `trainer_user_id` — accounts
+    are never hard-deleted (erasure anonymizes the row instead), so a
+    cascade would encode a deletion that cannot happen; ending an
+    assignment is an explicit service action that writes the FR-023
+    audit entry.
+
+    `availability_updated_at` is the coach's own "last revised" stamp
+    for their weekly availability (data-model.md §104, research.md
+    R2-09) — written on every accepted save *and* on a clear, which is
+    why it cannot be derived from the slot rows.
     """
 
     __tablename__ = "coach_details"
+    __table_args__ = (
+        CheckConstraint(
+            "(trainer_user_id IS NULL) = (joined_at IS NULL)",
+            name="ck_coach_details_assignment_pair",
+        ),
+        Index("ix_coach_details_trainer", "trainer_user_id"),
+    )
 
     user_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
@@ -47,6 +68,11 @@ class CoachDetail(Base):
     credentials: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     certifications: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     is_publicly_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    trainer_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=True
+    )
+    joined_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    availability_updated_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class ParentContact(Base):

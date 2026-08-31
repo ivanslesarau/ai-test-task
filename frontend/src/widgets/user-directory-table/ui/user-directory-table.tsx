@@ -5,6 +5,7 @@ import { Link, useNavigate } from '@tanstack/react-router'
 import { useUiStore } from '@/app/store/ui-store'
 import { useUserDirectory } from '@/entities/user/api/use-users'
 import type { DirectorySearch } from '@/entities/user/model/directory-search'
+import { ImpersonateAction } from '@/features/admin/impersonation/ui/impersonate-action'
 import { ReinviteButton } from '@/features/admin/reinvite-user/ui/reinvite-button'
 import type { AccountStatus, UserRole } from '@/shared/api/types'
 import { useDebouncedCallback } from '@/shared/lib/use-debounced-callback'
@@ -191,6 +192,7 @@ export function UserDirectoryTable({ search }: UserDirectoryTableProps) {
                         Reactivate
                       </Button>
                     )}
+                    <ImpersonateAction user={user} />
                   </TableCell>
                 </TableRow>
               ))}

@@ -12,6 +12,13 @@ export function isTrainer(user: CurrentUser | undefined): boolean {
   return hasRole(user, 'trainer')
 }
 
+/** Extension (2026-08-28, spec 002): a coach's own "My Times" page is
+ * Coach-only (FR-024) — the direct counterpart to `isTrainer` above,
+ * following the same one-role-one-predicate shape. */
+export function isCoach(user: CurrentUser | undefined): boolean {
+  return hasRole(user, 'coach')
+}
+
 export function isPlayerParent(user: CurrentUser | undefined): boolean {
   return hasRole(user, 'player_parent')
 }

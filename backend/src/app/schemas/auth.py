@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.schemas.branding import PortalBranding
+from app.schemas.impersonation import ImpersonationOut
 
 
 class LoginRequest(BaseModel):
@@ -31,6 +32,12 @@ class CurrentUser(BaseModel):
     context_count: int
     is_child_account: bool
     portal_branding: PortalBranding
+    # Extension (2026-08-28, impersonation, contract v1.3.0): while an
+    # impersonation is live, every field above describes the
+    # *impersonated* person (FR-043); these two are the only way a client
+    # learns otherwise (research.md R2-14, R2-20).
+    impersonation: ImpersonationOut | None
+    impersonation_ended: ImpersonationOut | None
 
 
 class InvitationCheckResponse(BaseModel):

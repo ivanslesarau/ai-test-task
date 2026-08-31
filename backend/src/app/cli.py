@@ -262,9 +262,7 @@ async def _seed_demo_family() -> int:
         db_session.add(
             UserProfile(user_id=trainer.id, first_name="Demo", last_name="Trainer", updated_at=now)
         )
-        db_session.add(
-            TrainerOrganization(user_id=trainer.id, business_name="Demo Family Academy")
-        )
+        db_session.add(TrainerOrganization(user_id=trainer.id, business_name="Demo Family Academy"))
 
         link = ShareLink(
             id=new_uuid(),

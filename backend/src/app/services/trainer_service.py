@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import utcnow
 from app.models.enums import PlayerProfileKind
 from app.repositories.association_repository import AssociationRepository
+from app.repositories.availability_repository import AvailabilityRepository
+from app.schemas.availability import AvailabilitySlotModel
 from app.schemas.trainer_player import ResponsibleContact, TrainerPlayerPage, TrainerPlayerSummary
 
 
@@ -26,6 +28,7 @@ class TrainerService:
 
     def __init__(self, db_session: AsyncSession) -> None:
         self._associations = AssociationRepository(db_session)
+        self._availability = AvailabilityRepository(db_session)
 
     async def list_players(
         self, trainer_user_id: str, *, page: int, page_size: int, query: str | None
@@ -34,6 +37,12 @@ class TrainerService:
             trainer_user_id, page=page, page_size=page_size, query=query
         )
         today = utcnow().date()
+
+        # US5, research.md R2-12: one `IN` query for the whole page, never
+        # one request per row (data-model.md §113).
+        slots_by_profile = await self._availability.list_for_profiles(
+            [row.player_profile.id for row in rows]
+        )
 
         items = [
             TrainerPlayerSummary(
@@ -66,6 +75,15 @@ class TrainerService:
                         else None
                     )
                 ),
+                availability=[
+                    AvailabilitySlotModel(
+                        day_of_week=slot.day_of_week,
+                        start_minute=slot.start_minute,
+                        end_minute=slot.end_minute,
+                    )
+                    for slot in slots_by_profile.get(row.player_profile.id, [])
+                ],
+                availability_updated_at=row.player_profile.availability_updated_at,
                 responsible_contact=ResponsibleContact(
                     display_name=(
                         f"{row.responsible_account_profile.first_name}"
